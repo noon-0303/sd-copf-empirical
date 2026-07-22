@@ -21,8 +21,11 @@ def copulafitall23(copula_list, c, u):
     u = np.clip(u, 1e-6, 1.0 - 1e-6)
 
     try:
-        bc = pv.Bicop(family=_FAMILY_MAP[c])
-        bc.fit(u)
+        bc = pv.Bicop.from_data(
+            u, controls=pv.FitControlsBicop(
+                family_set=[_FAMILY_MAP[c]], preselect_families=False
+            )
+        )
         value = bc.pdf(u)
         value = np.where(np.isfinite(value), value, 1e-300)
         value = np.maximum(value, 1e-300)

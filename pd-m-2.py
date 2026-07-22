@@ -28,7 +28,7 @@ T, Y = y1.shape
 var1_emp = np.var(y1, axis=0, ddof=1)
 var2_emp = np.var(y2, axis=0, ddof=1)
 
-N = 300
+N = 500
 k = 5
 p = 2
 h = T * 1e-4
@@ -36,6 +36,8 @@ a = np.sqrt(1.0 - h**2)
 
 copula_list = ["copulaN", "copulaT", "copulaC", "copulaF", "copulaG"]
 n_cop = len(copula_list)
+
+FORCE_COPULA = "copulaF"   # 暫時強制固定使用 copulaF；還原成 logLik 篩選設為 None
 
 d = 1.0 / 10
 
@@ -339,6 +341,7 @@ for j in range(Y):
 
             ################## ( 3.1 ) — 計算 copula ( 用來計算權重 ) ##############################
 
+
             MU    = (np.column_stack([theta1[t, :, 0], theta2[t, :, 0]])
                      - x[t, :, :] / 2.0)
             SIGMA = np.sqrt(np.maximum(x[t, :, :], 1e-12))
@@ -379,13 +382,16 @@ for j in range(Y):
         MU_ll  = (np.column_stack([theta1_s[:, 0, ci], theta2_s[:, 0, ci]])
                   - x_s[:, :, ci] / 2.0)                            # (T, 2)
         SIG_ll = np.sqrt(np.maximum(x_s[:, :, ci], 1e-12))          # (T, 2)
-        u_ll   = np.clip(stats.norm.cdf(y, MU_ll, SIG_ll), 1e-4, 1 - 1e-4)
+        u_ll   = np.clip(stats.norm.cdf(y, MU_ll, SIG_ll), 1e-6, 1 - 1e-6)
         yp_ll  = stats.norm.pdf(y, MU_ll, SIG_ll)
         cop_ll, rho_ll = copulafitall23(copula_list, c, u_ll)
         jpdf   = np.maximum(cop_ll * yp_ll[:, 0] * yp_ll[:, 1], np.finfo(float).tiny)
         logLik[j, ci]     = np.sum(np.log(jpdf))
 
-        if x_best is None or logLik[j, ci] > logLik[j, best_ci_so_far]:
+        _is_selected = (c == FORCE_COPULA) if FORCE_COPULA is not None \
+            else (x_best is None or logLik[j, ci] > logLik[j, best_ci_so_far])
+
+        if _is_selected:
             best_ci_so_far = ci
             x_best       = x_s[:, :, ci].copy()
             theta1_best  = theta1_s[:, :, ci].copy()
@@ -405,7 +411,7 @@ for j in range(Y):
 
     # ── 選最佳 copula（logLik 最大）───────────
 
-    best_ci = int(np.argmax(logLik[j]))
+    best_ci = copula_list.index(FORCE_COPULA) if FORCE_COPULA is not None else int(np.argmax(logLik[j]))
     logLik_all[j] = logLik[j, best_ci]
 
 
@@ -447,7 +453,9 @@ axes[1, 0].legend()
 axes[1, 1].plot(t_arr, x_best[:, 1], label='Filtered')
 axes[1, 1].set_title('Volatility - 資產2')
 axes[1, 1].legend()
-plt.tight_layout(); plt.show()
+plt.tight_layout()
+fig.savefig('is_returns_and_volatility.png', dpi=150, bbox_inches='tight')
+plt.show()
 
 
 # ── 各 Copula Kendall's τ ────────────────────────────────────────────────────
@@ -524,7 +532,7 @@ def _christoffersen_ind(hit):
     n11 = int(((v[:-1] == 1) & (v[1:] == 1)).sum())
     pi01 = n01 / (n00 + n01) if (n00 + n01) > 0 else 0.0
     pi11 = n11 / (n10 + n11) if (n10 + n11) > 0 else 0.0
-    pi   = (n01 + n11) / len(v)
+    pi   = (n01 + n11) / (len(v)-1)
     if pi in (0.0, 1.0) or pi01 in (0.0, 1.0) or pi11 in (0.0, 1.0):
         return np.nan, np.nan
     lr = -2.0 * (
@@ -535,6 +543,7 @@ def _christoffersen_ind(hit):
     return lr, float(1.0 - stats.chi2.cdf(lr, df=1))
 
 
+# 表格
 def _dw(s):
     """字串顯示寬度（CJK 全形字元算 2，其餘算 1）。"""
     return sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in str(s))
@@ -544,76 +553,133 @@ def _rj(s, w): return ' ' * max(0, w - _dw(str(s))) + str(s)
 def _fl(v):    return f'{v:.4f}' if not np.isnan(v) else 'nan'
 def _sig(p):   return '*' if (not np.isnan(p) and p < 0.05) else ' '
 
-WCOL = [  14,     9,     7,      8,     7,      8,     7,     8,    7]
+WCOL = [  14,     9,     7,      8,     7,      8,     7]
 HCOL = ['資產', '違反/T', '違反率',
-        'LR_POF', 'p_POF', 'LR_ind', 'p_ind', 'LR_cc', 'p_cc']
+        'LR_POF', 'p_POF', 'LR_ind', 'p_ind']
 
+
+
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ────── Volatility Forecasting & QLIKE ───────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+PRED_PATH = r"C:\Users\user\PycharmProjects\sd-copf\Empirical\data\real_data2-1_pred.xlsx"
+y_pred1 = pd.read_excel(PRED_PATH, sheet_name='return1', header=None).values.ravel()
+y_pred2 = pd.read_excel(PRED_PATH, sheet_name='return2', header=None).values.ravel()
+y_pred  = np.column_stack([y_pred1, y_pred2])
+T_pred  = len(y_pred1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── SV 參數有效性檢定（κ > 0, θ > 0, σ > 0）────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# def _ttest_gt0(arr):
-#     """單側 t 檢定：H₀: μ ≤ 0，H₁: μ > 0。回傳 (均值, t, p)。"""
-#     t_stat, p = stats.ttest_1samp(arr, popmean=0, alternative='greater')
-#     return float(np.mean(arr)), float(t_stat), float(p)
-#
-# PIDX = [1,         2,         3        ]
-# PLAB = ['κ > 0', 'θ > 0', 'σ > 0']
-# PDSC = ['均值回歸為正', '長期變異數為正', '波動率為正']
-#
-# PW   = [16,        10,     8,      7]
-#
-# print(f'\n── SV 參數有效性檢定（最佳 Copula: {copula_list[best_ci_out]}）──')
-# print('    H₀: 各參數 ≤ 0；單側 t 檢定，* p < 0.05 拒絕 H₀（確認條件成立）')
-# print(f'\n    {"":16s}  {"─── 資產1 ───":^27s}  {"─── 資產2 ───":^27s}')
-# print('    ' + '  '.join([
-#     _rj('檢定', PW[0]), _rj('估計值', PW[1]), _rj('t-stat', PW[2]), _rj('p 值', PW[3]),
-#     _rj('估計值', PW[1]), _rj('t-stat', PW[2]), _rj('p 值', PW[3]),
-# ]))
-# print('    ' + '  '.join('-' * w for w in [PW[0]] + PW[1:] * 2))
-#
-# for pidx, plab, pdsc in zip(PIDX, PLAB, PDSC):
-#     m1_, t1, p1 = _ttest_gt0(theta1_best[:, pidx])
-#     m2_, t2, p2 = _ttest_gt0(theta2_best[:, pidx])
-#     label = f'{plab}（{pdsc}）'
-#     row = [
-#         _lj(label,           PW[0]),
-#         _rj(f'{m1_:.6f}',    PW[1]),
-#         _rj(f'{t1:.4f}',     PW[2]),
-#         _rj(f'{p1:.4f}' + _sig(p1), PW[3]),
-#         _rj(f'{m2_:.6f}',    PW[1]),
-#         _rj(f'{t2:.4f}',     PW[2]),
-#         _rj(f'{p2:.4f}' + _sig(p2), PW[3]),
-#     ]
-#     print('    ' + '  '.join(row))
-#
-# # Feller 條件：2κθ − σ² > 0
-# feller1 = 2 * theta1_best[:, 1] * theta1_best[:, 2] - theta1_best[:, 3]**2
-# feller2 = 2 * theta2_best[:, 1] * theta2_best[:, 2] - theta2_best[:, 3]**2
-# mf1, tf1, pf1 = _ttest_gt0(feller1)
-# mf2, tf2, pf2 = _ttest_gt0(feller2)
-# feller_row = [
-#     _lj('2κθ > σ²（Feller 條件）', PW[0]),
-#     _rj(f'{mf1:.6f}',  PW[1]),
-#     _rj(f'{tf1:.4f}',  PW[2]),
-#     _rj(f'{pf1:.4f}' + _sig(pf1), PW[3]),
-#     _rj(f'{mf2:.6f}',  PW[1]),
-#     _rj(f'{tf2:.4f}',  PW[2]),
-#     _rj(f'{pf2:.4f}' + _sig(pf2), PW[3]),
-# ]
-# print('    ' + '  '.join(feller_row))
-#
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ── Volatility Forecasting & QLIKE ───────────────────────────────────────────
+# ── 牛熊市判定（峰谷回撤法，20% drawdown rule）────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 
-FCST_HORIZONS = [1, 5, 10, 22]
-WIN_OOS_MAX   = 120
-RV_WIN        = 10
+BEAR_THRESHOLD = 0.20   # 峰值下跌 20% 判定進入熊市，谷底反彈 20% 判定進入牛市
 
+def _classify_bull_bear(price, threshold=BEAR_THRESHOLD):
+    """峰谷回撤法：回傳每期市場狀態（'bull'/'bear'）。
+    熊市起點回溯至前一個波峰，牛市起點回溯至前一個波谷。"""
+    n = len(price)
+    turning_points = []          # (index, 'peak' | 'trough')
+    mode = 'up'
+    ext_i, ext_v = 0, price[0]
+    for t in range(1, n):
+        if mode == 'up':
+            if price[t] > ext_v:
+                ext_i, ext_v = t, price[t]
+            elif price[t] <= ext_v * (1 - threshold):
+                turning_points.append((ext_i, 'peak'))
+                mode = 'down'
+                ext_i, ext_v = t, price[t]
+        else:
+            if price[t] < ext_v:
+                ext_i, ext_v = t, price[t]
+            elif price[t] >= ext_v * (1 + threshold):
+                turning_points.append((ext_i, 'trough'))
+                mode = 'up'
+                ext_i, ext_v = t, price[t]
+
+    state = np.empty(n, dtype=object)
+    if not turning_points:
+        state[:] = 'bull' if mode == 'up' else 'bear'
+        return state
+
+    first_i, first_kind = turning_points[0]
+    state[:first_i + 1] = 'bull' if first_kind == 'peak' else 'bear'
+
+    for (i0, k0), (i1, k1) in zip(turning_points[:-1], turning_points[1:]):
+        state[i0:i1 + 1] = 'bear' if k0 == 'peak' else 'bull'
+
+    last_i, last_kind = turning_points[-1]
+    state[last_i:] = 'bear' if last_kind == 'peak' else 'bull'
+    return state
+
+
+def _segments_by_state(state, target):
+    """回傳 state 中連續等於 target 的 (start, end) 索引清單（含頭尾）。"""
+    segs, start = [], None
+    for t, s in enumerate(state):
+        if s == target and start is None:
+            start = t
+        elif s != target and start is not None:
+            segs.append((start, t - 1))
+            start = None
+    if start is not None:
+        segs.append((start, len(state) - 1))
+    return segs
+
+
+y_full     = np.concatenate([y, y_pred], axis=0)       # IS + OOS 完整報酬序列
+price_full = np.exp(np.cumsum(y_full, axis=0))         # 由對數報酬重建價格指數（起始基準=1）
+t_full     = np.arange(len(y_full))
+oos_split  = T                                          # IS/OOS 分界索引（IS 共 T 期）
+
+fig_regime, axes_regime = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
+for ai, aname in enumerate(['資產1', '資產2']):
+    price_i = price_full[:, ai]
+    state_i = _classify_bull_bear(price_i, BEAR_THRESHOLD)
+
+    ax = axes_regime[ai]
+    ax.plot(t_full, price_i, color='black', linewidth=1.0, label='價格指數（重建，起始=1）')
+    for s, e in _segments_by_state(state_i, 'bull'):
+        ax.axvspan(s, e, color='tab:green', alpha=0.15)
+    for s, e in _segments_by_state(state_i, 'bear'):
+        ax.axvspan(s, e, color='tab:red', alpha=0.15)
+    ax.axvline(oos_split, color='blue', linestyle='--', linewidth=1.0, label='IS/OOS 分界')
+    ax.set_title(f'{aname}：牛熊市判定（峰谷回撤法，門檻={BEAR_THRESHOLD:.0%}）')
+    ax.set_ylabel('價格指數')
+    ax.legend(loc='upper left', fontsize=8)
+
+axes_regime[-1].set_xlabel('t（IS 全期 + OOS，虛線右側為 OOS）')
+plt.tight_layout()
+fig_regime.savefig('bull_bear_regime.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print(f'\n── 牛熊市判定摘要（峰谷回撤法，門檻={BEAR_THRESHOLD:.0%}）──')
+for ai, aname in enumerate(['資產1', '資產2']):
+    state_i    = _classify_bull_bear(price_full[:, ai], BEAR_THRESHOLD)
+    bear_segs  = _segments_by_state(state_i, 'bear')
+    bull_segs  = _segments_by_state(state_i, 'bull')
+    n_bear     = sum(e - s + 1 for s, e in bear_segs)
+    n_bull     = sum(e - s + 1 for s, e in bull_segs)
+    bear_str   = ', '.join(f'[{s},{e}]' for s, e in bear_segs) if bear_segs else '無'
+    print(f'  {aname}：熊市 {n_bear} 期（{n_bear/len(state_i):.1%}）、牛市 {n_bull} 期（{n_bull/len(state_i):.1%}）')
+    print(f'    熊市區段：{bear_str}')
+
+
+RV_WIN        = 10   # 一般窗長
+RV_WIN_TRUE   = 20   # QLIKE 真值（rv_concat 置中窗，IS+OOS）窗長
+
+
+
+
+
+# ────────────── DM 檢定通用函式 ────────────────────────────────────────────────────────
 
 def _dm_test(loss1, loss2, h_horizon=1):
     """
@@ -640,159 +706,315 @@ def _dm_test(loss1, loss2, h_horizon=1):
     return float(dm), p_two, p_less
 
 
-PRED_PATH = r"C:\Users\user\PycharmProjects\sd-copf\Empirical\data\real_data2-1_pred.xlsx"
-y_pred1 = pd.read_excel(PRED_PATH, sheet_name='return1', header=None).values.ravel()
-y_pred2 = pd.read_excel(PRED_PATH, sheet_name='return2', header=None).values.ravel()
-y_pred  = np.column_stack([y_pred1, y_pred2])
-T_pred  = len(y_pred1)
 
-# 逐期（t-1 資訊）κ／θ／μ，取代原本的全樣本時間平均常數
-# （原本 np.mean(theta1_best[:, idx]) 會把 T-1 期「已收斂」的參數混進第 1 期的預測，
-#   造成 IS forecast 對早期樣本有前視污染）
-kappa1_hat_t = np.clip(theta1_best[:-1, 1], 1e-8, 10.0)   # (T-1,)
-long1_hat_t  = theta1_best[:-1, 2]                         # (T-1,)
-kappa2_hat_t = np.clip(theta2_best[:-1, 1], 1e-8, 10.0)
+
+
+
+# ────────────── IS 1-step-ahead forecast（用於 IS QLIKE 對照）─────────────────────────────
+
+# 逐期參數
+kappa1_hat_t = theta1_best[:-1, 1]   # (T-1,)，不截斷，跟 h_roll 側一致
+long1_hat_t  = theta1_best[:-1, 2]   # (T-1,)
+kappa2_hat_t = theta2_best[:-1, 1]
 long2_hat_t  = theta2_best[:-1, 2]
 
-# ── A. 樣本內 1-step-ahead forecast（用於 IS QLIKE 對照）─────────────────────
+
+# 一步預測
 h_is    = np.empty((T, 2))
 h_is[0] = x_best[0]
 h_is[1:, 0] = x_best[:-1, 0] + kappa1_hat_t * (long1_hat_t - x_best[:-1, 0])
 h_is[1:, 1] = x_best[:-1, 1] + kappa2_hat_t * (long2_hat_t - x_best[:-1, 1])
 h_is = np.maximum(h_is, 1e-10)
 
-mu1_is_t = theta1_best[:-1, 0]   # (T-1,)，逐期 μ（t-1 資訊）
+
+# 計算 IS部份 PIT
+mu1_is_t = theta1_best[:-1, 0]
 mu2_is_t = theta2_best[:-1, 0]
 drift_is = np.column_stack([
     mu1_is_t - 0.5 * x_best[:-1, 0],
     mu2_is_t - 0.5 * x_best[:-1, 1]
 ])
 z_is    = y[1:] - drift_is
-rv_is_m = np.column_stack([
-    pd.Series(z_is[:, 0]**2).rolling(RV_WIN).mean().values,
-    pd.Series(z_is[:, 1]**2).rolling(RV_WIN).mean().values
-])
 
-qlike_is   = np.nanmean(np.log(h_is[1:]) + rv_is_m / h_is[1:], axis=0)
-h_const_is = np.nanmean(rv_is_m, axis=0)
 
-# ── B. 滾動 OOS 序列粒子濾波（固定參數，逐期以觀測值更新波動度狀態）────────
+
+
+
+
+# ──────────── OOS Rolling 序列粒子濾波 ───────────────────────────────────────────────
+
+
+rv_start = np.array([
+    np.mean(y[-RV_WIN-1:-1, 0]**2),
+    np.mean(y[-RV_WIN-1:-1, 1]**2)
+])                                        # IS/OOS 交接處的 RV 估計
+
+# 加法平移（不是乘法縮放）：保留粒子雲的絕對離散度不變（跟 x_final 完全一樣），
+# 只把平均水準搬到 rv_start，避免乘法縮放在 c 偏離 1 時壓縮/膨脹絕對多樣性。
+# 下限 1e-10 防止平移後個別粒子跌到非正值（變異數必須為正）。
+x_oos_init = np.maximum(x_final - x_final.mean(axis=0) + rv_start, 1e-10)
+
 r2_oos       = np.random.randn(T_pred, N, 2)
-x_oos        = x_final.copy()
+x_oos        = x_oos_init.copy()
+theta1_oos   = theta1_final.copy()
+theta2_oos   = theta2_final.copy()        # 複製最後一期的粒子參數、狀態
+
 x_oos_states = np.empty((T_pred, N, 2))
-h_roll       = np.empty((T_pred, 2))
+theta1_oos_states = np.empty((T_pred, N, k))
+theta2_oos_states = np.empty((T_pred, N, k))     # 宣告估計值位置
 
+h_roll       = np.empty((T_pred, 2))      # 滾動一步預測
+
+
+# OOS迴圈(重抽樣、固定參數)
+# OOS波動度估計值用 IS 最後一期的縮放當第一期
 for t in range(T_pred):
-    x_oos_states[t] = x_oos
+    x_oos_states[t]      = x_oos
+    theta1_oos_states[t] = theta1_oos
+    theta2_oos_states[t] = theta2_oos     # 儲存估計值
 
-    mu1 = x_oos[:, 0] + theta1_final[:, 1] * (theta1_final[:, 2] - x_oos[:, 0])
-    mu2 = x_oos[:, 1] + theta2_final[:, 1] * (theta2_final[:, 2] - x_oos[:, 1])
+    mu1 = x_oos[:, 0] + theta1_oos[:, 1] * (theta1_oos[:, 2] - x_oos[:, 0])
+    mu2 = x_oos[:, 1] + theta2_oos[:, 1] * (theta2_oos[:, 2] - x_oos[:, 1])
     h_roll[t, 0] = float(np.mean(np.maximum(mu1, 1e-10)))
-    h_roll[t, 1] = float(np.mean(np.maximum(mu2, 1e-10)))
+    h_roll[t, 1] = float(np.mean(np.maximum(mu2, 1e-10)))        # 儲存各時點一步預測的估計值
 
     if t < T_pred - 1:
         sx1  = np.sqrt(np.maximum(x_oos[:, 0], 1e-8))
         sx2  = np.sqrt(np.maximum(x_oos[:, 1], 1e-8))
-        r1a  = (y_pred[t, 0] - (theta1_final[:, 0] - 0.5 * x_oos[:, 0])) / sx1
-        r1b  = (y_pred[t, 1] - (theta2_final[:, 0] - 0.5 * x_oos[:, 1])) / sx2
-        rho1 = theta1_final[:, 4]
-        rho2 = theta2_final[:, 4]
-        x_oos[:, 0] = np.maximum(
-            x_oos[:, 0] + theta1_final[:, 1] * (theta1_final[:, 2] - x_oos[:, 0])
-            + theta1_final[:, 3] * sx1
+        r1a  = (y_pred[t, 0] - (theta1_oos[:, 0] - 0.5 * x_oos[:, 0])) / sx1
+        r1b  = (y_pred[t, 1] - (theta2_oos[:, 0] - 0.5 * x_oos[:, 1])) / sx2   # 殘差
+
+        rho1 = theta1_oos[:, 4]
+        rho2 = theta2_oos[:, 4]
+        x_new = np.empty((N, 2))
+
+        # 計算下期波動度
+        x_new[:, 0] = np.maximum(
+            x_oos[:, 0] + theta1_oos[:, 1] * (theta1_oos[:, 2] - x_oos[:, 0])
+            + theta1_oos[:, 3] * sx1
               * (rho1 * r1a + np.sqrt(np.maximum(1 - rho1**2, 0)) * r2_oos[t, :, 0]),
             1e-10)
-        x_oos[:, 1] = np.maximum(
-            x_oos[:, 1] + theta2_final[:, 1] * (theta2_final[:, 2] - x_oos[:, 1])
-            + theta2_final[:, 3] * sx2
+        x_new[:, 1] = np.maximum(
+            x_oos[:, 1] + theta2_oos[:, 1] * (theta2_oos[:, 2] - x_oos[:, 1])
+            + theta2_oos[:, 3] * sx2
               * (rho2 * r1b + np.sqrt(np.maximum(1 - rho2**2, 0)) * r2_oos[t, :, 1]),
             1e-10)
 
-mu1_oos   = float(np.mean(theta1_final[:, 0]))
-mu2_oos   = float(np.mean(theta2_final[:, 0]))
+        # 重要性權重
+        y_t      = np.tile(y_pred[t], (N, 1))
+        MU_pred  = np.column_stack([theta1_oos[:, 0] - mu1 / 2, theta2_oos[:, 0] - mu2 / 2])
+        SIG_pred = np.sqrt(np.column_stack([np.maximum(mu1, 1e-12), np.maximum(mu2, 1e-12)]))
+        u_pred   = stats.norm.cdf(y_t, MU_pred, SIG_pred)
+        yp_pred  = stats.norm.pdf(y_t, MU_pred, SIG_pred)
+        cop_pred, _ = copulafitall23(copula_list, copula_list[best_ci_out],
+                                      np.column_stack([u_pred[:, 0], u_pred[:, 1]]))
+        lik_pred = cop_pred * yp_pred[:, 0] * yp_pred[:, 1]
+
+        MU_new  = np.column_stack([theta1_oos[:, 0] - x_new[:, 0] / 2, theta2_oos[:, 0] - x_new[:, 1] / 2])
+        SIG_new = np.sqrt(np.maximum(x_new, 1e-12))
+        u_new   = stats.norm.cdf(y_t, MU_new, SIG_new)
+        yp_new  = stats.norm.pdf(y_t, MU_new, SIG_new)
+        cop_new, _ = copulafitall23(copula_list, copula_list[best_ci_out],
+                                     np.column_stack([u_new[:, 0], u_new[:, 1]]))
+        lik_new = cop_new * yp_new[:, 0] * yp_new[:, 1]
+
+        w_oos = lik_new / np.maximum(lik_pred, 1e-300)
+        w_sum = w_oos.sum()
+        w_oos = w_oos / w_sum if w_sum > 0 else np.full(N, 1.0 / N)
+
+
+
+        rs_oos     = np.random.choice(N, N, replace=True, p=w_oos)   # 重抽樣
+        x_oos      = x_new[rs_oos]
+        theta1_oos = theta1_oos[rs_oos]
+        theta2_oos = theta2_oos[rs_oos]
+
+
+
+mu_oos_t  = np.column_stack([
+    np.mean(theta1_oos_states[:, :, 0], axis=1),
+    np.mean(theta2_oos_states[:, :, 0], axis=1),
+])                                                 # 每期粒子平均 mu
+x_oos_mean = np.column_stack([
+    np.mean(x_oos_states[:, :, 0], axis=1),
+    np.mean(x_oos_states[:, :, 1], axis=1)
+])                                                 # 每期粒子平均波動度
 drift_oos = np.column_stack([
-    mu1_oos - 0.5 * np.mean(x_oos_states[:, :, 0], axis=1),
-    mu2_oos - 0.5 * np.mean(x_oos_states[:, :, 1], axis=1)
-])
-z_pred    = y_pred - drift_oos
-rv_pred_m = np.column_stack([
-    pd.Series(z_pred[:, 0]**2).rolling(RV_WIN).mean().values,
-    pd.Series(z_pred[:, 1]**2).rolling(RV_WIN).mean().values
+    mu_oos_t[:, 0] - 0.5 * x_oos_mean[:, 0],
+    mu_oos_t[:, 1] - 0.5 * x_oos_mean[:, 1]
+])                                                 # 漂移
+
+z_pred    = y_pred - drift_oos                     # PIT
+
+
+
+
+
+# ────────────── 以 RV 估計的真值與基準 ───────────────────────────────────────────────────────────
+
+# 真值用來當 QLIKE/DM 的評分基準（事後量測），IS 接 OOS 後用置中窗估計
+# 改用原始報酬平方（非模型漂移去中心化後的 z），避免 proxy／基準吃到模型自己估計出的漂移
+y_concat  = np.concatenate([y[1:], y_pred], axis=0)
+rv_concat = np.column_stack([
+    pd.Series(y_concat[:, 0]**2).rolling(RV_WIN_TRUE, center=True).mean().values,
+    pd.Series(y_concat[:, 1]**2).rolling(RV_WIN_TRUE, center=True).mean().values
 ])
 
-# ── C. 樣本內 vs 樣本外 QLIKE 比較表 ─────────────────────────────────────────
-qlike_oos       = np.nanmean(np.log(h_roll)    + rv_pred_m / h_roll,    axis=0)
-qlike_bench_is  = np.log(h_const_is) + np.nanmean(rv_is_m   / h_const_is, axis=0)
-qlike_bench_oos = np.log(h_const_is) + np.nanmean(rv_pred_m / h_const_is, axis=0)
+n_is      = z_is.shape[0]
+rv_is_m   = rv_concat[:n_is]   # IS的波動度真值
+rv_pred_m = rv_concat[n_is:]   # OOS的波動度真值
 
-print(f'\n── QLIKE 比較（realized proxy = {RV_WIN}-day rolling z²（去漂移殘差））──')
+
+# 基準：逐期向後窗 RV
+# shift(2)：h_is[s]/h_roll[s] 預測波動度 s 時( y 的 t = s+1 )，公式使用的資訊到 s-1 期為止
+bench_concat = np.column_stack([
+    pd.Series(y_concat[:, 0]**2).rolling(RV_WIN).mean().shift(2).values,
+    pd.Series(y_concat[:, 1]**2).rolling(RV_WIN).mean().shift(2).values
+])
+
+rv_bench_is  = np.maximum(bench_concat[:n_is], 1e-10)    # IS的波動度基準
+rv_bench_oos = np.maximum(bench_concat[n_is:], 1e-10)    # OOS的波動度基準
+
+
+
+
+
+
+# ────────── QLIKE 計算與比較表 ─────────────────────────────────────────
+
+# 平均一步預測 QLIKE 計算 ( 公式 : log(估計) + 真值 / 估計 )
+qlike_is        = np.nanmean(np.log(h_is[1:-1])   + rv_is_m[1:]   / h_is[1:-1],  axis=0)
+qlike_oos       = np.nanmean(np.log(h_roll[:-1])  + rv_pred_m[1:] / h_roll[:-1], axis=0)
+qlike_bench_is  = np.nanmean(np.log(rv_bench_is)  + rv_is_m   / rv_bench_is,  axis=0)
+qlike_bench_oos = np.nanmean(np.log(rv_bench_oos) + rv_pred_m / rv_bench_oos, axis=0)
+
+
+print(f'\n── QLIKE 比較（realized proxy = {RV_WIN_TRUE}-day centered y²（原始報酬平方，事後量測）──')
 print(f'  {"":22s}  {"資產1":>12s}  {"資產2":>12s}')
 print('  ' + '-' * 52)
 print(f'  {"IS  SV-Copula":22s}  {qlike_is[0]:12.6f}  {qlike_is[1]:12.6f}')
-print(f'  {"IS  常數基準":22s}  {qlike_bench_is[0]:12.6f}  {qlike_bench_is[1]:12.6f}')
+print(f'  {"IS  基準(向後窗RV)":22s}  {qlike_bench_is[0]:12.6f}  {qlike_bench_is[1]:12.6f}')
 print(f'  {"IS  差值(基準-模型)":22s}  {qlike_bench_is[0]-qlike_is[0]:12.6f}  {qlike_bench_is[1]-qlike_is[1]:12.6f}')
 print('  ' + '-' * 52)
 print(f'  {"OOS SV-Copula":22s}  {qlike_oos[0]:12.6f}  {qlike_oos[1]:12.6f}')
-print(f'  {"OOS 常數基準(IS σ²)":22s}  {qlike_bench_oos[0]:12.6f}  {qlike_bench_oos[1]:12.6f}')
+print(f'  {"OOS 基準(向後窗RV)":22s}  {qlike_bench_oos[0]:12.6f}  {qlike_bench_oos[1]:12.6f}')
 print(f'  {"OOS 差值(基準-模型)":22s}  {qlike_bench_oos[0]-qlike_oos[0]:12.6f}  {qlike_bench_oos[1]-qlike_oos[1]:12.6f}')
-print('  （差值 > 0 表示模型優於常數基準）')
+print('  （差值 > 0 表示模型優於基準）')
 
-# ── D. Diebold-Mariano 檢定（1-step IS & OOS）───────────────────────────────
-loss_sv_is     = np.log(h_is[1:])   + rv_is_m   / h_is[1:]
-loss_bench_is  = np.log(h_const_is) + rv_is_m   / h_const_is
-loss_sv_oos    = np.log(h_roll)     + rv_pred_m  / h_roll
-loss_bench_oos = np.log(h_const_is) + rv_pred_m  / h_const_is
 
-dm_is_1,  p2_is_1,  pl_is_1  = _dm_test(loss_sv_is[:, 0],  loss_bench_is[:, 0],  h_horizon=1)
-dm_is_2,  p2_is_2,  pl_is_2  = _dm_test(loss_sv_is[:, 1],  loss_bench_is[:, 1],  h_horizon=1)
-dm_oos_1, p2_oos_1, pl_oos_1 = _dm_test(loss_sv_oos[:, 0], loss_bench_oos[:, 0], h_horizon=1)
-dm_oos_2, p2_oos_2, pl_oos_2 = _dm_test(loss_sv_oos[:, 1], loss_bench_oos[:, 1], h_horizon=1)
 
-print('\n── Diebold-Mariano 檢定（SV-Copula vs 常數基準，QLIKE 損失差）──')
-print('  H₀: 等預測精準度；H₁(less): SV 損失 < 基準損失（* p<0.05）')
-print(f'  {"":12s}  {"─── 資產1 ───":^32s}  {"─── 資產2 ───":^32s}')
-print(f'  {"":12s}  {"DM-stat":>10s}  {"p(two)":>8s}  {"p(less)":>9s}  {"DM-stat":>10s}  {"p(two)":>8s}  {"p(less)":>9s}')
-print('  ' + '-' * 82)
-print(f'  {"IS  (h=1)":12s}  {dm_is_1:10.4f}  {p2_is_1:8.4f}  {pl_is_1:8.4f}{_sig(pl_is_1)}  {dm_is_2:10.4f}  {p2_is_2:8.4f}  {pl_is_2:8.4f}{_sig(pl_is_2)}')
-print(f'  {"OOS (h=1)":12s}  {dm_oos_1:10.4f}  {p2_oos_1:8.4f}  {pl_oos_1:8.4f}{_sig(pl_oos_1)}  {dm_oos_2:10.4f}  {p2_oos_2:8.4f}  {pl_oos_2:8.4f}{_sig(pl_oos_2)}')
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── Rolling h-step Forecast QLIKE & DM 檢定（樣本外）─────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
 
-print('\n── Rolling h-step Forecast QLIKE & DM 檢定（樣本外，CIR 解析解）──')
-print(f'  {"h":>4s}  {"Q1":>12s}  {"DM1":>9s}  {"p2_1":>7s}  {"pl_1":>7s}'
-      f'  {"Q2":>12s}  {"DM2":>9s}  {"p2_2":>7s}  {"pl_2":>7s}  {"n":>6s}')
-print('  ' + '-' * 100)
+# ────────── Rolling h-step Forecast QLIKE & DM 檢定（ OOS ）────────────────────────────────
 
+print('\n── Rolling h-step Forecast QLIKE & DM 檢定（ 使用 CIR 解析解）──')
+print(f'  {"h":>4s}  {"Q1":>12s}  {"DM1":>9s}  {"pl_1":>7s}'
+      f'  {"Q2":>12s}  {"DM2":>9s}  {"pl_2":>7s}  {"n":>6s}')
+print('  ' + '-' * 86)
+
+
+FCST_HORIZONS = [1, 5, 10, 22]
+
+
+# 根據 [1, 5, 10, 22] 天數計算 QLIKE
 for h_fc in FCST_HORIZONS:
-    n_periods = T_pred - h_fc + 1
+    n_periods = T_pred - h_fc
     if n_periods <= 0:
         continue
 
     st   = x_oos_states[:n_periods]
-    k1   = np.clip(theta1_final[None, :, 1], 0.0, 1.0)
-    th1  = theta1_final[None, :, 2]
-    k2   = np.clip(theta2_final[None, :, 1], 0.0, 1.0)
-    th2  = theta2_final[None, :, 2]
+    k1   = theta1_oos_states[:n_periods, :, 1]
+    th1  = theta1_oos_states[:n_periods, :, 2]
+    k2   = theta2_oos_states[:n_periods, :, 1]
+    th2  = theta2_oos_states[:n_periods, :, 2]
 
+    # 多步預測公式
     fcast1 = th1 + (st[:, :, 0] - th1) * (1 - k1)**h_fc
     fcast2 = th2 + (st[:, :, 1] - th2) * (1 - k2)**h_fc
     fh1    = np.mean(np.maximum(fcast1, 1e-10), axis=1)
     fh2    = np.mean(np.maximum(fcast2, 1e-10), axis=1)
 
-    rv_tgt      = rv_pred_m[h_fc-1:h_fc-1+n_periods]
+    # QLIKE 計算
+    rv_tgt      = rv_pred_m[h_fc:h_fc+n_periods]
+    bench_h     = rv_bench_oos[:n_periods]
     loss_sv_h1  = np.log(fh1) + rv_tgt[:, 0] / fh1
     loss_sv_h2  = np.log(fh2) + rv_tgt[:, 1] / fh2
-    loss_bch_h1 = np.log(h_const_is[0]) + rv_tgt[:, 0] / h_const_is[0]
-    loss_bch_h2 = np.log(h_const_is[1]) + rv_tgt[:, 1] / h_const_is[1]
+    loss_bch_h1 = np.log(bench_h[:, 0]) + rv_tgt[:, 0] / bench_h[:, 0]
+    loss_bch_h2 = np.log(bench_h[:, 1]) + rv_tgt[:, 1] / bench_h[:, 1]
 
     q1 = float(np.nanmean(loss_sv_h1))
     q2 = float(np.nanmean(loss_sv_h2))
-    dm_h1, p2_h1, pl_h1 = _dm_test(loss_sv_h1, loss_bch_h1, h_horizon=h_fc)
-    dm_h2, p2_h2, pl_h2 = _dm_test(loss_sv_h2, loss_bch_h2, h_horizon=h_fc)
-    print(f'  {h_fc:>4d}  {q1:12.6f}  {dm_h1:9.4f}  {p2_h1:7.4f}  {pl_h1:7.4f}{_sig(pl_h1)}'
-          f'  {q2:12.6f}  {dm_h2:9.4f}  {p2_h2:7.4f}  {pl_h2:7.4f}{_sig(pl_h2)}  {n_periods:>6d}')
+    dm_h1, _, pl_h1 = _dm_test(loss_sv_h1, loss_bch_h1, h_horizon=h_fc)
+    dm_h2, _, pl_h2 = _dm_test(loss_sv_h2, loss_bch_h2, h_horizon=h_fc)
+    print(f'  {h_fc:>4d}  {q1:12.6f}  {dm_h1:9.4f}  {pl_h1:7.4f}{_sig(pl_h1)}'
+          f'  {q2:12.6f}  {dm_h2:9.4f}  {pl_h2:7.4f}{_sig(pl_h2)}  {n_periods:>6d}')
+
+
+
+
+# ────────── 各時點一步預測平均 QLIKE 計算 ( for 製圖 ) ────────────────────────────────
+
+loss_sv_is     = np.log(h_is[1:-1])   + rv_is_m[1:]   / h_is[1:-1]
+loss_bench_is  = np.log(rv_bench_is)  + rv_is_m   / rv_bench_is
+loss_sv_oos    = np.log(h_roll[:-1])  + rv_pred_m[1:] / h_roll[:-1]
+loss_bench_oos = np.log(rv_bench_oos) + rv_pred_m / rv_bench_oos      # 各時點的一步預測 QLIKE
+
+loss_sv_is_t       = np.full((T - 1, 2), np.nan)
+loss_sv_is_t[1:]   = loss_sv_is
+loss_sv_oos_t       = np.full((T_pred, 2), np.nan)
+loss_sv_oos_t[1:]   = loss_sv_oos                          # 適當調整位置
+
+
+
+# ────────── 製圖 ────────────────────────────────────────────────────────────────────────────
+
+# 圖：IS
+t_is_arr      = np.arange(1, T)
+_proxy_lbl_is = f'y² proxy (centered {RV_WIN_TRUE}d)' if RV_WIN_TRUE > 1 else 'y² proxy (逐期)'
+
+fig_is, axes_is = plt.subplots(2, 2, figsize=(14, 8))
+for ai, aname in enumerate(['資產1', '資產2']):
+    axes_is[0, ai].plot(t_is_arr,      rv_is_m[:, ai],   label=_proxy_lbl_is,              alpha=0.6)
+    # h_is[1:-1][s]（＝h_is[s+1]）預測的是目標期 s+2，畫在 t_is_arr[1:]（=[2,...,T-1]）才對齊
+    axes_is[0, ai].plot(t_is_arr[1:], h_is[1:-1, ai], label='IS 1-step forecast',       linewidth=1.5)
+    axes_is[0, ai].set_title(f'IS 1-step Forecast vs y² Proxy - {aname}')
+    axes_is[0, ai].legend()
+    axes_is[1, ai].plot(t_is_arr, loss_sv_is_t[:, ai],   label='SV-Copula')
+    axes_is[1, ai].plot(t_is_arr, loss_bench_is[:, ai],  label='基準(向後窗RV)', alpha=0.5)
+    axes_is[1, ai].set_title(f'IS QLIKE - {aname}')
+    axes_is[1, ai].set_xlabel('t (IS)')
+    axes_is[1, ai].legend()
+plt.suptitle('In-Sample Volatility Forecast & QLIKE', fontsize=13)
+plt.tight_layout()
+fig_is.savefig('is_forecast_qlike.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+
+# 圖：OOS
+t_pred_arr = np.arange(T_pred)
+_proxy_lbl = f'y² proxy (centered {RV_WIN_TRUE}d)' if RV_WIN_TRUE > 1 else 'y² proxy (逐期)'
+
+fig3, axes3 = plt.subplots(2, 2, figsize=(14, 8))
+for ai, aname in enumerate(['資產1', '資產2']):
+    axes3[0, ai].plot(t_pred_arr,    rv_pred_m[:, ai], label=_proxy_lbl,             alpha=0.6)
+    axes3[0, ai].plot(t_pred_arr[1:], h_roll[:-1, ai], label='Rolling 1-step forecast', linewidth=1.5)
+    axes3[0, ai].set_title(f'OOS 1-step Forecast vs y² Proxy - {aname}')
+    axes3[0, ai].legend()
+    axes3[1, ai].plot(t_pred_arr, loss_sv_oos_t[:, ai],   label='SV-Copula')
+    axes3[1, ai].plot(t_pred_arr, loss_bench_oos[:, ai],  label='基準(向後窗RV)', alpha=0.5)
+    axes3[1, ai].set_title(f'OOS QLIKE - {aname}')
+    axes3[1, ai].set_xlabel('t (OOS)')
+    axes3[1, ai].legend()
+plt.tight_layout()
+fig3.savefig('oos_forecast_qlike.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+
+
+
+
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ── VaR 回測（OOS）：Kupiec POF & Christoffersen CC ──────────────────────────
@@ -801,7 +1023,7 @@ for h_fc in FCST_HORIZONS:
 
 SEP         = '  '
 mu_hat_oos  = drift_oos
-sig_hat_oos = np.sqrt(np.maximum(h_roll, 1e-10))
+sig_hat_oos = np.sqrt(np.maximum(x_oos_mean, 1e-10))   # 與 drift_oos 同源（x_oos_states），非 h_roll，避免均值/波動用不同期變異數
 
 for alpha in VaR_LEVELS:
     pct          = int((1 - alpha) * 100)
@@ -823,8 +1045,6 @@ for alpha in VaR_LEVELS:
         p_hat         = n_viol / T_pred
         lr_uc, p_uc   = _kupiec_pof(hit_oos, alpha)
         lr_ind, p_ind = _christoffersen_ind(hit_oos)
-        lr_cc = (lr_uc + lr_ind) if not (np.isnan(lr_uc) or np.isnan(lr_ind)) else np.nan
-        p_cc  = float(1.0 - stats.chi2.cdf(lr_cc, df=2)) if not np.isnan(lr_cc) else np.nan
 
         row = [
             _lj(lab,                       WCOL[0]),
@@ -834,86 +1054,22 @@ for alpha in VaR_LEVELS:
             _rj(_fl(p_uc)  + _sig(p_uc),   WCOL[4]),
             _rj(_fl(lr_ind),               WCOL[5]),
             _rj(_fl(p_ind) + _sig(p_ind),  WCOL[6]),
-            _rj(_fl(lr_cc),                WCOL[7]),
-            _rj(_fl(p_cc)  + _sig(p_cc),   WCOL[8]),
         ]
         print('    ' + SEP.join(row))
 
 
-# ── Rolling 1-step QLIKE（樣本外，window WIN_OOS）────────────────────────────
-WIN_OOS        = min(WIN_OOS_MAX, T_pred // 4)
-roll_qlike_oos = np.full((T_pred, 2), np.nan)
-for t in range(WIN_OOS, T_pred):
-    sl = slice(t - WIN_OOS, t)
-    h_sl  = h_roll[sl]
-    rv_sl = rv_pred_m[sl]
-    roll_qlike_oos[t, 0] = float(np.nanmean(np.log(h_sl[:, 0]) + rv_sl[:, 0] / h_sl[:, 0]))
-    roll_qlike_oos[t, 1] = float(np.nanmean(np.log(h_sl[:, 1]) + rv_sl[:, 1] / h_sl[:, 1]))
-
-# ── 粒子 1-step 90% CI（向量化）─────────────────────────────────────────────
-mu_all_1 = (x_oos_states[:, :, 0]
-            + theta1_final[None, :, 1] * (theta1_final[None, :, 2] - x_oos_states[:, :, 0]))
-mu_all_2 = (x_oos_states[:, :, 1]
-            + theta2_final[None, :, 1] * (theta2_final[None, :, 2] - x_oos_states[:, :, 1]))
-h_roll_q05 = np.column_stack([np.quantile(np.maximum(mu_all_1, 1e-10), 0.05, axis=1),
-                               np.quantile(np.maximum(mu_all_2, 1e-10), 0.05, axis=1)])
-h_roll_q95 = np.column_stack([np.quantile(np.maximum(mu_all_1, 1e-10), 0.95, axis=1),
-                               np.quantile(np.maximum(mu_all_2, 1e-10), 0.95, axis=1)])
-
-# ── IS 滾動 QLIKE（window WIN_OOS）──────────────────────────────────────────
-T_is          = T - 1
-roll_qlike_is = np.full((T_is, 2), np.nan)
-for t in range(WIN_OOS, T_is):
-    sl = slice(t - WIN_OOS, t)
-    h_sl_is  = h_is[1:][sl]
-    rv_sl_is = rv_is_m[sl]
-    roll_qlike_is[t, 0] = float(np.nanmean(np.log(h_sl_is[:, 0]) + rv_sl_is[:, 0] / h_sl_is[:, 0]))
-    roll_qlike_is[t, 1] = float(np.nanmean(np.log(h_sl_is[:, 1]) + rv_sl_is[:, 1] / h_sl_is[:, 1]))
-
-# ── 圖：IS 1-step forecast vs z² / rolling QLIKE ────────────────────────────
-t_is_arr      = np.arange(1, T)
-_proxy_lbl_is = f'z² proxy (rolling {RV_WIN}d)' if RV_WIN > 1 else 'z² proxy (逐期，去漂移)'
-
-fig_is, axes_is = plt.subplots(2, 2, figsize=(14, 8))
-for ai, aname in enumerate(['資產1', '資產2']):
-    axes_is[0, ai].plot(t_is_arr, rv_is_m[:, ai],  label=_proxy_lbl_is,              alpha=0.6)
-    axes_is[0, ai].plot(t_is_arr, h_is[1:, ai],    label='IS 1-step (posterior mean)', linewidth=1.5)
-    axes_is[0, ai].set_title(f'IS 1-step Forecast vs z² Proxy - {aname}')
-    axes_is[0, ai].legend()
-    axes_is[1, ai].plot(np.arange(T_is), roll_qlike_is[:, ai])
-    axes_is[1, ai].set_title(f'IS Rolling QLIKE (W={WIN_OOS}) - {aname}')
-    axes_is[1, ai].set_xlabel('t (IS)')
-plt.suptitle('In-Sample Volatility Forecast & QLIKE', fontsize=13)
-plt.tight_layout(); plt.show()
-
-# ── 圖：OOS 滾動 1-step forecast vs realized RV / rolling QLIKE ──────────────
-t_pred_arr = np.arange(T_pred)
-_proxy_lbl = f'z² proxy (rolling {RV_WIN}d)' if RV_WIN > 1 else 'z² proxy (逐期，去漂移)'
-
-fig3, axes3 = plt.subplots(2, 2, figsize=(14, 8))
-for ai, aname in enumerate(['資產1', '資產2']):
-    axes3[0, ai].plot(t_pred_arr, rv_pred_m[:, ai],  label=_proxy_lbl,                        alpha=0.6)
-    axes3[0, ai].plot(t_pred_arr, h_roll[:, ai],      label='Rolling 1-step (posterior mean)', linewidth=1.5)
-    axes3[0, ai].fill_between(t_pred_arr,
-                               h_roll_q05[:, ai], h_roll_q95[:, ai],
-                               alpha=0.2, label='90% CI')
-    axes3[0, ai].set_title(f'OOS 1-step Forecast vs z² Proxy - {aname}')
-    axes3[0, ai].legend()
-    axes3[1, ai].plot(t_pred_arr, roll_qlike_oos[:, ai])
-    axes3[1, ai].set_title(f'OOS Rolling QLIKE (W={WIN_OOS}) - {aname}')
-    axes3[1, ai].set_xlabel('t (OOS)')
-plt.tight_layout(); plt.show()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── (1) Rosenblatt OOS PIT：i.i.d. U(0,1) 檢定（無 look-ahead）─────────────
+# ──  Rosenblatt OOS PIT：i.i.d. U(0,1) 檢定（無 look-ahead）─────────────
 # ─────────────────────────────────────────────────────────────────────────────
 
-# OOS 邊際 PIT（h_roll[t] 與 drift_oos[t] 均基於觀察 y_pred[t] 前的粒子狀態）
-sig_oos_pit = np.sqrt(np.maximum(h_roll, 1e-10))          # (T_pred, 2)
+# OOS 邊際 PIT（drift_oos[t] 基於觀察 y_pred[t] 前的粒子狀態；波動度改用置中窗 RV 真值，見上）
+sig_oos_pit = np.sqrt(rv_pred_m)                            # (T_pred, 2)  ← RV 置中窗真值
 u_oos_pit   = stats.norm.cdf((y_pred - drift_oos) / sig_oos_pit)
 u_oos_pit   = np.clip(u_oos_pit, 1e-10, 1 - 1e-10)
-
+valid_oos   = ~np.any(np.isnan(u_oos_pit), axis=1)   # 置中窗右側缺未來資料，OOS 尾端排除
+#
 # IS copula 固定擬合（只用 IS 邊際 PIT u，OOS 評估時無前視）
 _FAMILY_MAP_PD = {
     'copulaN': pv.BicopFamily.gaussian,
@@ -922,83 +1078,348 @@ _FAMILY_MAP_PD = {
     'copulaF': pv.BicopFamily.frank,
     'copulaG': pv.BicopFamily.gumbel,
 }
-bc_is = pv.Bicop(family=_FAMILY_MAP_PD[copula_list[best_ci_out]])
-bc_is.fit(np.clip(u, 1e-6, 1 - 1e-6))
+# bc_is = pv.Bicop(family=_FAMILY_MAP_PD[copula_list[best_ci_out]])
+# bc_is.fit(np.clip(u, 1e-6, 1 - 1e-6))
+#
+# # 聯合 Rosenblatt 轉換：z₁ = u₁，z₂ = C_{2|1}(u₂|u₁; IS copula)
+# z_rosen = np.full((T_pred, 2), np.nan)
+# z_rosen[valid_oos, 0] = u_oos_pit[valid_oos, 0]
+# z_rosen[valid_oos, 1] = bc_is.hfunc1(u_oos_pit[valid_oos]).ravel()
+# z_rosen[valid_oos]    = np.clip(z_rosen[valid_oos], 1e-10, 1 - 1e-10)
+#
+#
+# def _rj_tag(p):
+#     return '  （拒絕）' if p < 0.05 else '  （未拒絕）'
+#
+#
+# def _print_pit_block(u_mat, var_labels, title):
+#     """列印一組 Rosenblatt PIT 的 LB 檢定結果。"""
+#     print(f'\n  ── {title} ──')
+#     for ai, lbl in enumerate(var_labels):
+#         col = u_mat[:, ai]
+#         col = col[~np.isnan(col)]
+#         v   = stats.norm.ppf(col)
+#         lbm = float(acorr_ljungbox(v,    lags=[20], return_df=True)['lb_pvalue'].iloc[-1])
+#         lbv = float(acorr_ljungbox(v**2, lags=[20], return_df=True)['lb_pvalue'].iloc[-1])
+#         print(f'\n    {lbl}：')
+#         print(f'      LB(20)  Φ⁻¹(u) 串列:     p={lbm:.4f}{_rj_tag(lbm)}')
+#         print(f'      LB²(20) [Φ⁻¹(u)]² ARCH:  p={lbv:.4f}{_rj_tag(lbv)}')
+#
+#
+# print(f'\n── Rosenblatt OOS PIT 檢定（無 look-ahead，IS 擬合 {copula_list[best_ci_out]} copula）──')
+# print(f'  OOS 邊際波動度：滯後滾動 RV（RV_WIN={RV_WIN}，僅用 t-1 以前資料，前 {RV_WIN} 期無值已排除）')
+# print('  H₀：序列為 i.i.d. U(0,1)；p < 0.05 拒絕 H₀')
+#
+# _print_pit_block(z_rosen,   ['z₁ = u₁（邊際）', 'z₂ = C₂|₁(u₂|u₁)（條件）'],
+#                  '聯合 Rosenblatt U(0,1) 檢定（OOS，文獻標準）')
 
-# 聯合 Rosenblatt 轉換：z₁ = u₁，z₂ = C_{2|1}(u₂|u₁; IS copula)
-z_rosen = np.column_stack([
-    u_oos_pit[:, 0],
-    bc_is.hfunc1(u_oos_pit).ravel()
-])
-z_rosen = np.clip(z_rosen, 1e-10, 1 - 1e-10)
 
-
-def _rj_tag(p):
-    return '  （拒絕）' if p < 0.05 else '  （未拒絕）'
-
-
-def _print_pit_block(u_mat, var_labels, title):
-    """列印一組 Rosenblatt PIT 的 LB 檢定結果。"""
-    print(f'\n  ── {title} ──')
-    for ai, lbl in enumerate(var_labels):
-        col = u_mat[:, ai]
-        v   = stats.norm.ppf(col)
-        lbm = float(acorr_ljungbox(v,    lags=[20], return_df=True)['lb_pvalue'].iloc[-1])
-        lbv = float(acorr_ljungbox(v**2, lags=[20], return_df=True)['lb_pvalue'].iloc[-1])
-        print(f'\n    {lbl}：')
-        print(f'      LB(20)  Φ⁻¹(u) 串列:     p={lbm:.4f}{_rj_tag(lbm)}')
-        print(f'      LB²(20) [Φ⁻¹(u)]² ARCH:  p={lbv:.4f}{_rj_tag(lbv)}')
-
-
-print(f'\n── Rosenblatt OOS PIT 檢定（無 look-ahead，IS 擬合 {copula_list[best_ci_out]} copula）──')
-print('  H₀：序列為 i.i.d. U(0,1)；p < 0.05 拒絕 H₀')
-
-_print_pit_block(z_rosen,   ['z₁ = u₁（邊際）', 'z₂ = C₂|₁(u₂|u₁)（條件）'],
-                 '聯合 Rosenblatt U(0,1) 檢定（OOS，文獻標準）')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── (2) Copula-only OOS DM：各 Copula 增益 vs 獨立基準 ───────────────────────
+# ── Copula-only OOS DM：各 Copula 增益 vs 獨立基準 ───────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 
 print('\n── Copula-only OOS DM（log c(u₁,u₂) vs 獨立基準）──')
-print('  各 copula 以 IS 邊際 PIT 固定擬合後評估 OOS log c（無前視）')
+print('  各 copula 以 IS 邊際 PIT 固定擬合後評估 OOS log c（copula 擬合本身無前視；')
+print('  邊際 PIT 改用置中窗 RV 真值，屬事後量測，非嚴格前向）')
 print('  損失差 dₜ = −log c(u₁ₜ,u₂ₜ)；H₁(gain): E[d]<0 ⟺ copula 優於獨立（* p<0.05）')
-print(f'\n  {"Copula":12s}  {"avg log c":>12s}  {"DM stat":>10s}  {"p(two)":>8s}  {"p(gain)":>8s}')
-print('  ' + '-' * 58)
+print(f'\n  {"Copula":12s}  {"avg log c":>12s}  {"DM stat":>10s}  {"p(gain)":>8s}')
+print('  ' + '-' * 48)
 
 u_oos_c = np.clip(u_oos_pit, 1e-6, 1 - 1e-6)
+lc_all  = np.full((T_pred, n_cop), np.nan)   # 逐日 log c(u₁,u₂)，5 個 copula 都存
 for ci, cop_name in enumerate(copula_list):
     try:
         bc_c = pv.Bicop(family=_FAMILY_MAP_PD[cop_name])
         bc_c.fit(np.clip(u, 1e-6, 1 - 1e-6))
-        lc   = np.clip(np.log(np.maximum(bc_c.pdf(u_oos_c), 1e-300)), -50.0, 50.0)
+        lc   = np.full(T_pred, np.nan)
+        lc[valid_oos] = np.clip(
+            np.log(np.maximum(bc_c.pdf(u_oos_c[valid_oos]), 1e-300)), -50.0, 50.0)
     except Exception:
         lc   = np.zeros(T_pred)
-    avg_lc        = float(np.mean(lc))
-    dm_s, p2, pl  = _dm_test(-lc, np.zeros(T_pred), h_horizon=1)
+    lc_all[:, ci] = lc
+    avg_lc        = float(np.nanmean(lc))
+    dm_s, _, pl   = _dm_test(-lc, np.zeros(T_pred), h_horizon=1)
     note = ' ← 最佳' if ci == best_ci_out else ''
-    print(f'  {cop_name:12s}  {avg_lc:12.6f}  {dm_s:10.4f}  {p2:8.4f}  {pl:8.4f}{_sig(pl)}{note}')
+    print(f'  {cop_name:12s}  {avg_lc:12.6f}  {dm_s:10.4f}  {pl:8.4f}{_sig(pl)}{note}')
 
 print('\n  （avg log c > 0：OOS 聯合密度優於獨立；p(gain) < 0.05：copula 增益統計顯著）')
 
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────── OOS 逐日最佳 Copula ───────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 邏輯：每個 copula 都用同一組 IS 邊際 PIT 固定擬合（無前視，見上），
+# 每一天各自比較 lc_all（log c）argmax，不做滾動視窗加總；
+# 連續判為同一個 copula 的日子合併列印成一段，方便閱讀。
+
+valid_day = ~np.any(np.isnan(lc_all), axis=1)
+best_day  = np.full(T_pred, -1, dtype=int)
+best_day[valid_day] = np.argmax(lc_all[valid_day], axis=1)
+
+fig_cop_day, ax_cop_day = plt.subplots(figsize=(14, 2.2))
+_colors = {'copulaN': '#888888', 'copulaT': '#1f77b4', 'copulaC': '#2ca02c',
+           'copulaF': '#d62728', 'copulaG': '#9467bd'}
+for ci, cop_name in enumerate(copula_list):
+    mask = valid_day & (best_day == ci)
+    ax_cop_day.fill_between(np.arange(T_pred), 0, 1, where=mask,
+                             color=_colors[cop_name], step='mid', label=cop_name)
+ax_cop_day.set_yticks([])
+ax_cop_day.set_xlabel('t (OOS)')
+ax_cop_day.set_title('OOS 逐日最佳 Copula')
+ax_cop_day.legend(loc='upper right', ncol=5, fontsize=8)
+plt.tight_layout()
+fig_cop_day.savefig('oos_daily_best_copula.png', dpi=150, bbox_inches='tight')
+plt.show()
 
 
 
 
 
-# ── FKO 共用參數與輔助函式 ──────────────────────────────────────────────────
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ────────────── OOS 初期短期 τ 追蹤診斷 ───────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+
+SHORT_WIN = RV_WIN             # 10，短期尺度，與 RV_WIN 對齊（τ_model／RW基準的回望窗長度）
+TRUTH_WIN = 2 * SHORT_WIN      # 20，置中窗長度（真值估計專用，跟 SHORT_WIN 脫鉤，可獨立調大）
+_half_truth = TRUTH_WIN // 2
+
+# _early_mask      = valid_day.copy(); _early_mask[SHORT_WIN:]      = False
+# _early2_mask     = valid_day.copy(); _early2_mask[:SHORT_WIN] = False; _early2_mask[2 * SHORT_WIN:] = False
+# _n_early_best    = int(np.sum(_early_mask  & (best_day == best_ci_out)))
+# _n_early2_best   = int(np.sum(_early2_mask & (best_day == best_ci_out)))
+# print(f'\n  主迴圈最佳 Copula（{copula_list[best_ci_out]}）在初期（第1~{SHORT_WIN}天）'
+#       f'為當日最優的天數：{_n_early_best} / {int(_early_mask.sum())}')
+# print(f'  主迴圈最佳 Copula（{copula_list[best_ci_out]}）在次初期（第{SHORT_WIN + 1}~{2 * SHORT_WIN}天）'
+#       f'為當日最優的天數：{_n_early2_best} / {int(_early2_mask.sum())}')
+
+print('\n' + '═'*78)
+print(f' OOS 初期短期 τ 追蹤診斷（SHORT_WIN={SHORT_WIN}，IS 尾端墊底回望）')
+print('═'*78)
+print(f'  τ_model 短窗版：回望 {SHORT_WIN} 期（嚴格 t 之前，不含 t，無前視），')
+print(f'  前 {SHORT_WIN} 期用 IS 尾端 RV-PIT 墊底，讓 OOS 從第1期就有值')
+print(f'  邊際：與 u_oos_c 同一套「滯後滾動 RV（RV_WIN={RV_WIN}）」，避免原始/PIT空間錯配')
+print(f'  τ_realized（真值）：置中窗 [t-{_half_truth}, t+{_half_truth})，長度TRUTH_WIN={TRUTH_WIN}，')
+print(f'  允許使用 t 前後資料，目的是降低真值估計本身的雜訊，非嚴格前向預測評估')
+print(f'  （置中窗跟 τ_model 的回望窗長度脫鉤，詳見下方對照 RW/h_roll 基準）')
+print()
+
+def _mae_bias(e):
+    e = e[~np.isnan(e)]
+    if len(e) == 0:
+        return np.nan, np.nan, 0
+    return float(np.mean(np.abs(e))), float(np.mean(e)), len(e)  # mae,bias計算函式
+
+
+
+
+
+
+
+# ──────────────  計算 tau ( 模型 copula 估計、 stats.kendalltau的估計跟真值 ) ─────────────────────
+
+
+# 模型部分
+_pad   = max(SHORT_WIN, _half_truth)
+_warm  = _pad + RV_WIN + 5                       # 抓 IS 尾端，確保 rolling(RV_WIN) 初期有效
+
+_z_br  = np.concatenate([z_is[-_warm:], z_pred], axis=0)
+_rv_br = np.column_stack([
+    pd.Series(_z_br[:, 0]**2).rolling(RV_WIN).mean().shift(2).values,
+    pd.Series(_z_br[:, 1]**2).rolling(RV_WIN).mean().shift(2).values
+])                                               # 使用在 QLIKE 計算的去漂移殘差估計 RV
+
+_rv_br = np.maximum(_rv_br, 1e-10)
+_u_br  = np.clip(stats.norm.cdf(_z_br / np.sqrt(_rv_br)), 1e-6, 1 - 1e-6)
+_u_br  = _u_br[_warm - _pad:]
+_oos0  = _pad                                   # 以 RV 估計的波動度計算 PIT
+
+_tau_mod_short = np.full(T_pred, np.nan)        # 計算模型估計的 tau ( 波動度與 RV估計一致版 )
+for _t in range(T_pred):
+    _win = _u_br[_oos0 + _t - SHORT_WIN: _oos0 + _t]
+    if len(_win) < SHORT_WIN or np.any(np.isnan(_win)):
+        continue
+    _, _tau_s = copulafitall23(copula_list, copula_list[best_ci_out], _win)
+    _tau_mod_short[_t] = _tau_s
+
+
+
+# 真值 ( 報酬率置中窗 RV 估計 )
+_pad_y  = max(SHORT_WIN, _half_truth)
+_y_br   = np.concatenate([y[-_pad_y:], y_pred], axis=0)    # 原始報酬橋接（IS尾端+OOS）
+_oos0_y = _pad_y
+
+_tau_real_short = np.full(T_pred, np.nan)      # tau 真值：置中窗 [t-_half_truth, t+_half_truth)
+for _t in range(0, T_pred - _half_truth):
+    _win_y = _y_br[_oos0_y + _t - _half_truth: _oos0_y + _t - _half_truth + TRUTH_WIN]
+    _kt, _ = stats.kendalltau(_win_y[:, 0], _win_y[:, 1])
+    _tau_real_short[_t] = _kt
+
+
+
+# 天真基準 ( 報酬率置後窗 RV 估計 )
+_tau_rw_short = np.full(T_pred, np.nan)        # 比較用 tau 估計：置前窗
+for _t in range(T_pred):
+    _win_y = _y_br[_oos0_y + _t - SHORT_WIN: _oos0_y + _t]
+    if len(_win_y) < SHORT_WIN:
+        continue
+    _kt, _ = stats.kendalltau(_win_y[:, 0], _win_y[:, 1])
+    _tau_rw_short[_t] = _kt
+
+
+
+
+
+
+
+# ────────────── 結果表格 ──────────────────────────────────────────────────────────────────────
+
+
+_seg_bounds = [(0, SHORT_WIN, f'OOS 第 1~{SHORT_WIN} 期（初期）'),
+               (SHORT_WIN, 2 * SHORT_WIN, f'OOS 第 {SHORT_WIN + 1}~{2 * SHORT_WIN} 期（次初期）'),
+               (2 * SHORT_WIN, T_pred - _half_truth, f'OOS 第 {2 * SHORT_WIN + 1} 期起（穩態段）')]
+
+_SW = [30, 8, 4, 9, 9, 10, 10]   # 區段/space/n/RV模型MAE/RW基準MAE/RV模型bias/RW基準bias
+_SH = ['區段', 'space', 'n', 'RV模型MAE', 'RW基準MAE', 'RV模型bias', 'RW基準bias']
+print('  ' + '  '.join(_lj(h, w) if i < 2 else _rj(h, w) for i, (h, w) in enumerate(zip(_SH, _SW))))
+print('  ' + '-' * (sum(_SW) + 2 * (len(_SW) - 1)))
+for _lo, _hi, _lbl in _seg_bounds:
+    _hi = min(_hi, T_pred - _half_truth)
+    if _hi <= _lo:
+        print('  ' + _lj(f'{_lbl}：樣本不足', _SW[0]))
+        continue
+    _sl = slice(_lo, _hi)
+
+    _mae_m,  _bias_m,  _n  = _mae_bias(_tau_real_short[_sl] - _tau_mod_short[_sl])
+    _mae_rw, _bias_rw, _   = _mae_bias(_tau_real_short[_sl] - _tau_rw_short[_sl])
+    print('  ' + '  '.join([
+        _lj(_lbl, _SW[0]), _lj('原始報酬', _SW[1]), _rj(_n, _SW[2]),
+        _rj(f'{_mae_m:.4f}', _SW[3]), _rj(f'{_mae_rw:.4f}', _SW[4]),
+        _rj(f'{_bias_m:.4f}', _SW[5]), _rj(f'{_bias_rw:.4f}', _SW[6]),
+    ]))
+print()
+print('  判準：模型MAE 明顯小於RW基準MAE → copula 擬合本身有額外貢獻，不只是持續性；')
+print('        初期 MAE 明顯大於穩態段 MAE → 暖機證據；相當 → IS/OOS 交接乾淨')
+print()
+
+# ── 圖：RV模型估計 τ vs RV真值 τ（OOS，逐期）──────────────────────────
+fig_tau_rv, ax_tau_rv = plt.subplots(figsize=(14, 4))
+ax_tau_rv.plot(_tau_mod_short, label='τ_model（RV模型估計）', lw=1.0)
+ax_tau_rv.plot(_tau_real_short, label='τ_realized（RV真值，置中窗）', lw=1.0)
+ax_tau_rv.axvline(SHORT_WIN, color='gray', lw=0.6, linestyle=':')
+ax_tau_rv.axvline(2 * SHORT_WIN, color='gray', lw=0.6, linestyle=':')
+ax_tau_rv.set_title(f'OOS 短窗 Kendall τ：RV模型估計 vs RV真值（SHORT_WIN={SHORT_WIN}）')
+ax_tau_rv.set_xlabel('OOS 時間索引'); ax_tau_rv.set_ylabel('Kendall τ')
+ax_tau_rv.legend()
+plt.tight_layout()
+fig_tau_rv.savefig('oos_tau_model_vs_real.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+
+
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ── 對照組：τ_model 改用 x_oos_mean（粒子濾波器自身「當期」波動度後驗）─────────
+# 目的：量化「用模型自己即時濾波出的波動度」相對於「用外部RV」的追蹤表現落差。
+# ═══════════════════════════════════════════════════════════════════════════
+
+print('\n' + '═'*78)
+print(f' 對照：τ_model 改用 x_oos_mean（模型自身波動度後驗，IS 尾端用 x_best 當期後驗墊底）')
+print('═'*78)
+print('  ⚠ 初期區段用 x_best 當期後驗（mu_hat/sig_hat）墊底，可能混有資訊洩漏，結果僅供參考')
+print('    （次初期／穩態段純落在 OOS，不受此限制）')
+print()
+
+
+_pad_h      = max(SHORT_WIN, _half_truth)
+
+_u_oos_h    = np.clip(stats.norm.cdf(z_pred / sig_hat_oos), 1e-6, 1 - 1e-6)
+_u_is_h     = np.clip(u[T - _pad_h:T], 1e-6, 1 - 1e-6)         # 拿以前算過東西的來計算 PIT
+
+_u_oos_h_br = np.concatenate([_u_is_h, _u_oos_h], axis=0)     # 橋接
+_oos0_h     = _pad_h
+
+
+_tau_mod_short_h = np.full(T_pred, np.nan)        # 以模型估計波動度計算的 tau
+for _t in range(T_pred):
+    _win = _u_oos_h_br[_oos0_h + _t - SHORT_WIN: _oos0_h + _t]
+    if len(_win) < SHORT_WIN or np.any(np.isnan(_win)):
+        continue
+    _, _tau_h = copulafitall23(copula_list, copula_list[best_ci_out], _win)
+    _tau_mod_short_h[_t] = _tau_h
+
+
+# 表格（n(RV) 跟 n(xm) 分開顯示，避免用不同覆蓋率的樣本互相比較 MAE）
+_SW2 = [30, 8, 5, 5, 10, 12, 10, 12]
+_SH2 = ['區段', 'space', 'n(RV)', 'n(xm)', 'RV模型MAE', 'x_oos_mean模型MAE', 'RV模型bias', 'x_oos_mean模型bias']
+print('  ' + '  '.join(_lj(h, w) if i < 2 else _rj(h, w) for i, (h, w) in enumerate(zip(_SH2, _SW2))))
+print('  ' + '-' * (sum(_SW2) + 2 * (len(_SW2) - 1)))
+for _lo, _hi, _lbl in _seg_bounds:
+    _hi = min(_hi, T_pred - _half_truth)
+    if _hi <= _lo:
+        print('  ' + _lj(f'{_lbl}：樣本不足', _SW2[0]))
+        continue
+    _sl = slice(_lo, _hi)
+
+    _mae_rv, _bias_rv, _n  = _mae_bias(_tau_real_short[_sl] - _tau_mod_short[_sl])
+    _mae_h,  _bias_h,  _nh = _mae_bias(_tau_real_short[_sl] - _tau_mod_short_h[_sl])
+    _mae_h_s  = f'{_mae_h:.4f}'  if _nh > 0 else 'n/a'
+    _bias_h_s = f'{_bias_h:.4f}' if _nh > 0 else 'n/a'
+    _cov_warn = '  ← n(xm)<n(RV)，x_oos_mean版樣本覆蓋率較低，MAE比較需謹慎' if _nh < _n else ''
+    print('  ' + '  '.join([
+        _lj(_lbl, _SW2[0]), _lj('原始報酬', _SW2[1]), _rj(_n, _SW2[2]), _rj(_nh, _SW2[3]),
+        _rj(f'{_mae_rv:.4f}', _SW2[4]), _rj(_mae_h_s, _SW2[5]),
+        _rj(f'{_bias_rv:.4f}', _SW2[6]), _rj(_bias_h_s, _SW2[7]),
+    ]) + _cov_warn)
+
+
+
+print()
+print('  判準：x_oos_mean版 MAE 明顯大於 RV版 → 邊際波動度預測品質正在拖累追蹤表現；')
+print('        兩者接近 → 目前邊際預測已經夠好，不是主要瓶頸')
+print('        （比較前請先確認 n(RV) 與 n(xm) 是否接近，落差過大代表比較基礎不公平）')
+print('  ※ 初期區段(x_oos_mean版)為 x_best 當期後驗墊底結果，可能有資訊洩漏，解讀需謹慎（見上方註解）')
+print()
+
+
+
+
+
+
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ──────────  FKO ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+
+
+# ──────────────── FKO 共用參數與輔助函式 ──────────────────────────────────────────────
+
 from scipy.optimize import brentq as _brentq
 
-RF_DAILY = 0.0
-TC_BPS   = 10.0 / 1e4
-GAMMAS   = [1.0, 5.0, 10.0]
-ANN      = 252
+RF_DAILY = 0.0                # 每日無風險利率
+TC_BPS   = 10.0 / 1e4         # 成本率
+GAMMAS   = [1.0, 5.0, 10.0]   # 風險係數
+ANN      = 252                # 一年天數
 
+
+# 相關性矩陣 ( rho 、 波動度 )
 def _build_cov(rho_series, h_mat):
-    """回傳 (T_pred, 2, 2)；對角=h_mat，非對角=rho*sqrt(h1*h2)。"""
     T_  = len(rho_series)
     cov = np.zeros((T_, 2, 2))
     cov[:, 0, 0] = h_mat[:, 0]
@@ -1007,36 +1428,38 @@ def _build_cov(rho_series, h_mat):
     cov[:, 1, 0] = cov[:, 0, 1]
     return cov
 
-_zis_res     = np.column_stack([y[1:, 0] - drift_is[:, 0],
-                                 y[1:, 1] - drift_is[:, 1]])
-cov_const_is = np.cov(_zis_res.T)
 
-def _portfolio(cov_seq, mu_t, mu_tgt):
-    """逐期解 w_risky = mu_tgt * Σ⁻¹μ_ex / (μ_ex'Σ⁻¹μ_ex)；回傳 Rp, turnover, w_seq。"""
-    ridge  = 1e-12 * np.eye(2)
+# 檢查相關性矩陣 SPD ( 某時點矩陣 )
+def _spd_inv(Sig, min_eig=1e-8):
+    vals, vecs = np.linalg.eigh(Sig)
+    vals = np.maximum(vals, min_eig)
+    return vecs @ np.diag(1.0 / vals) @ vecs.T
+
+
+# 求「 實現組合報酬 、 週轉率 、 權重序列 」 ( 相關性矩陣 、 報酬率 、 風險係數 )
+def _portfolio_ra(cov_seq, mu_t, gamma):
     Rp_arr = np.zeros(T_pred)
     to_arr = np.zeros(T_pred)
     w_seq  = np.zeros((T_pred, 2))
     w_prev = np.zeros(2)
     for t in range(T_pred):
         mu_ex = mu_t[t] - RF_DAILY
-        Sig   = cov_seq[t] + ridge
-        try:
-            Sinv  = np.linalg.inv(Sig)
-            denom = float(mu_ex @ Sinv @ mu_ex)
-            w_r   = mu_tgt * (Sinv @ mu_ex) / denom if denom > 1e-20 else np.zeros(2)
-        except np.linalg.LinAlgError:
-            w_r = np.zeros(2)
+        Sinv  = _spd_inv(cov_seq[t])
+        w_r   = (1.0 / gamma) * (Sinv @ mu_ex)
         w_seq[t]  = w_r
         to_arr[t] = float(np.sum(np.abs(w_r - w_prev)))
         w_prev    = w_r.copy()
         Rp_arr[t] = float(w_r @ y_pred[t]) + (1.0 - float(np.sum(w_r))) * RF_DAILY
     return Rp_arr, to_arr, w_seq
 
+
+# 二次效用逐期實現值 ( 把「組合報酬」轉換成「投資人主觀滿意度」 ) ( 實現組合報酬序列 、 風險報酬 )
 def _utility(Rp, gamma):
     g = gamma / (1.0 + gamma)
     return (1.0 + Rp) - 0.5 * g * (1.0 + Rp)**2
 
+
+# 績效費 ( 組合報酬 、 風險係數)
 def _perf_fee(Rp_model, Rp_bench, gamma):
     f = lambda d: float(np.mean(_utility(Rp_model - d, gamma) - _utility(Rp_bench, gamma)))
     lo, hi = -0.01, 0.01
@@ -1051,531 +1474,176 @@ def _perf_fee(Rp_model, Rp_bench, gamma):
             return float(_brentq(f, lo, hi, xtol=1e-8))
         except Exception:
             pass
-    dU   = float(np.mean(_utility(Rp_model, gamma) - _utility(Rp_bench, gamma)))
-    dU_d = float(np.mean(-(1.0 - gamma/(1.0+gamma)*(1.0+Rp_model))))
-    return (-dU / dU_d) if abs(dU_d) > 1e-20 else np.nan
+    return np.nan
 
+
+# nan處理
 def _ff(v, fmt='.4f'):
     return format(v, fmt) if not np.isnan(v) else 'nan'
 
-def _ann_stats(Rp):
-    mu_a  = float(np.mean(Rp)) * ANN
-    vol_a = float(np.std(Rp, ddof=1)) * np.sqrt(ANN)
-    sr    = mu_a / vol_a if vol_a > 1e-12 else np.nan
-    return mu_a, vol_a, sr
-
-mu_target = float(np.mean(drift_is))
-
-# ── 兩個獨立單市場 SV IS（C 對照基準：獨立重取樣，無 copula）────────────────
-print(f'正在跑獨立單市場 IS 粒子濾波（N={N}, T={T}）…', flush=True)
-
-# ── Asset 1 ──────────────────────────────────────────────────────────────
-np.random.seed(43)
-_r2_s1 = np.random.randn(T, N)
-_x1s   = np.zeros((T, N));    _th1s = np.zeros((T, N, k))
-_m1s   = np.zeros((T, N, k)); _mu1s = np.zeros((T, N))
-_w1s   = np.zeros((T, N))
-
-_x1s[0] = np.random.normal(v1j, v1j*d, N)
-_neg = _x1s[0] < 0;  _x1s[0, _neg] = 2*v1j - _x1s[0, _neg]
-_mu1s[0] = _x1s[0].copy();  _w1s[0] = 1.0/N
-_th1s[0,:,0] = np.random.normal(c1[0], v1_arr[0], N)
-_th1s[0,:,1] = np.clip(np.random.gamma(c1[1]**2/v1_arr[1]**2, v1_arr[1]**2/c1[1], N), 1e-6, np.inf)
-_th1s[0,:,2] = np.clip(np.random.gamma(v1j**2/v1_arr[2]**2,   v1_arr[2]**2/v1j,   N), 1e-6, np.inf)
-_th1s[0,:,3] = np.clip(np.random.gamma(c1[3]**2/v1_arr[3]**2, v1_arr[3]**2/c1[3], N), 1e-6, np.inf)
-_as1, _bs1 = c1[4]-np.sqrt(3)*v1_arr[4], c1[4]+np.sqrt(3)*v1_arr[4]
-_th1s[0,:,4] = np.clip(np.random.uniform(_as1, _bs1, N), -0.999, 0.999)
-
-for _t in range(1, T):
-    _wp1 = _w1s[_t-1]
-    # (1.1) 重抽樣前平滑
-    _m1s[_t-1] = a*_th1s[_t-1] + (1-a)*np.sum(_wp1[:,None]*_th1s[_t-1], axis=0)
-    # (1.2) 預測 mu
-    _mu1s[_t] = _x1s[_t-1] + _m1s[_t-1,:,1]*(_m1s[_t-1,:,2]-_x1s[_t-1])
-    # (1.3) g（單變量邊際密度）
-    _MUg1  = _m1s[_t-1,:,0] - _mu1s[_t]/2.0
-    _SIGg1 = np.sqrt(np.maximum(_mu1s[_t], 1e-12))
-    _g1    = _wp1 * stats.norm.pdf(y[_t,0], _MUg1, _SIGg1)
-    _g1s   = _g1.sum()
-    _g1    = _g1/_g1s if _g1s > 0 else np.full(N, 1.0/N)
-    # (2.1) 獨立重取樣（只動 asset 1 粒子）
-    _rs1 = np.random.choice(N, N, replace=True, p=_g1)
-    _x1s[_t-1]  = _x1s[_t-1, _rs1];   _th1s[_t-1] = _th1s[_t-1, _rs1]
-    # (2.2) 重取樣後平滑
-    _m1s[_t-1] = a*_th1s[_t-1] + (1-a)*np.mean(_th1s[_t-1], axis=0)
-    _v1s = np.maximum(np.var(_th1s[_t-1], axis=0, ddof=1), v_all1)
-    _mu1s[_t] = np.abs(_x1s[_t-1] + _m1s[_t-1,:,1]*(_m1s[_t-1,:,2]-_x1s[_t-1]))
-    # (2.3) 抽樣新 theta1
-    _th1s[_t,:,0] = np.random.normal(_m1s[_t-1,:,0], np.sqrt(h**2*_v1s[0]), N)
-    for _pi in [1, 2, 3]:
-        _ss = np.sqrt(h**2*_v1s[_pi])
-        _th1s[_t,:,_pi] = np.clip(np.random.gamma(_m1s[_t-1,:,_pi]**2/_ss**2, _ss**2/_m1s[_t-1,:,_pi]), 1e-6, np.inf)
-    _ss = np.sqrt(h**2*_v1s[4])
-    _th1s[_t,:,4] = np.clip(np.random.uniform(_m1s[_t-1,:,4]-np.sqrt(3)*_ss, _m1s[_t-1,:,4]+np.sqrt(3)*_ss), -0.999, 0.999)
-    # (2.4) SV 狀態更新
-    _xp0 = np.maximum(_x1s[_t-1], 1e-12)
-    _r1_ = (y[_t,0] - (_th1s[_t,:,0] - 0.5*_xp0)) / np.sqrt(_xp0)
-    _x1s[_t] = (_xp0 + _th1s[_t,:,1]*(_th1s[_t,:,2]-_xp0)
-                + _th1s[_t,:,3]*np.sqrt(_xp0)*(_th1s[_t,:,4]*_r1_
-                  + np.sqrt(np.maximum(1-_th1s[_t,:,4]**2, 0))*_r2_s1[_t]))
-    _x1s[_t] = np.abs(_x1s[_t])
-    # (3.1) 重要性權重（單變量）
-    _MUn1  = _th1s[_t,:,0] - _x1s[_t]/2.0
-    _SIGn1 = np.sqrt(np.maximum(_x1s[_t], 1e-12))
-    _MUp1  = _m1s[_t-1,:,0] - _mu1s[_t]/2.0
-    _SIGp1 = np.sqrt(np.maximum(_mu1s[_t], 1e-12))
-    _ln1   = stats.norm.pdf(y[_t,0], _MUn1, _SIGn1)
-    _lp1   = stats.norm.pdf(y[_t,0], _MUp1, _SIGp1)
-    _w1s[_t] = _ln1 / np.maximum(_lp1, 1e-300)
-    _wsum = _w1s[_t].sum()
-    _w1s[_t] = _w1s[_t]/_wsum if _wsum > 0 else np.full(N, 1.0/N)
-
-# ── Asset 2 ──────────────────────────────────────────────────────────────
-np.random.seed(44)
-_r2_s2 = np.random.randn(T, N)
-_x2s   = np.zeros((T, N));    _th2s = np.zeros((T, N, k))
-_m2s   = np.zeros((T, N, k)); _mu2s = np.zeros((T, N))
-_w2s   = np.zeros((T, N))
-
-_x2s[0] = np.random.normal(v2j, v2j*d, N)
-_neg = _x2s[0] < 0;  _x2s[0, _neg] = 2*v2j - _x2s[0, _neg]
-_mu2s[0] = _x2s[0].copy();  _w2s[0] = 1.0/N
-_th2s[0,:,0] = np.random.normal(c2[0], v2_arr[0], N)
-_th2s[0,:,1] = np.clip(np.random.gamma(c2[1]**2/v2_arr[1]**2, v2_arr[1]**2/c2[1], N), 1e-6, np.inf)
-_th2s[0,:,2] = np.clip(np.random.gamma(v2j**2/v2_arr[2]**2,   v2_arr[2]**2/v2j,   N), 1e-6, np.inf)
-_th2s[0,:,3] = np.clip(np.random.gamma(c2[3]**2/v2_arr[3]**2, v2_arr[3]**2/c2[3], N), 1e-6, np.inf)
-_as2, _bs2 = c2[4]-np.sqrt(3)*v2_arr[4], c2[4]+np.sqrt(3)*v2_arr[4]
-_th2s[0,:,4] = np.clip(np.random.uniform(_as2, _bs2, N), -0.999, 0.999)
-
-for _t in range(1, T):
-    _wp2 = _w2s[_t-1]
-    # (1.1) 重抽樣前平滑
-    _m2s[_t-1] = a*_th2s[_t-1] + (1-a)*np.sum(_wp2[:,None]*_th2s[_t-1], axis=0)
-    # (1.2) 預測 mu
-    _mu2s[_t] = _x2s[_t-1] + _m2s[_t-1,:,1]*(_m2s[_t-1,:,2]-_x2s[_t-1])
-    # (1.3) g（單變量邊際密度）
-    _MUg2  = _m2s[_t-1,:,0] - _mu2s[_t]/2.0
-    _SIGg2 = np.sqrt(np.maximum(_mu2s[_t], 1e-12))
-    _g2    = _wp2 * stats.norm.pdf(y[_t,1], _MUg2, _SIGg2)
-    _g2s   = _g2.sum()
-    _g2    = _g2/_g2s if _g2s > 0 else np.full(N, 1.0/N)
-    # (2.1) 獨立重取樣（只動 asset 2 粒子）
-    _rs2 = np.random.choice(N, N, replace=True, p=_g2)
-    _x2s[_t-1]  = _x2s[_t-1, _rs2];   _th2s[_t-1] = _th2s[_t-1, _rs2]
-    # (2.2) 重取樣後平滑
-    _m2s[_t-1] = a*_th2s[_t-1] + (1-a)*np.mean(_th2s[_t-1], axis=0)
-    _v2s = np.maximum(np.var(_th2s[_t-1], axis=0, ddof=1), v_all2)
-    _mu2s[_t] = np.abs(_x2s[_t-1] + _m2s[_t-1,:,1]*(_m2s[_t-1,:,2]-_x2s[_t-1]))
-    # (2.3) 抽樣新 theta2
-    _th2s[_t,:,0] = np.random.normal(_m2s[_t-1,:,0], np.sqrt(h**2*_v2s[0]), N)
-    for _pi in [1, 2, 3]:
-        _ss = np.sqrt(h**2*_v2s[_pi])
-        _th2s[_t,:,_pi] = np.clip(np.random.gamma(_m2s[_t-1,:,_pi]**2/_ss**2, _ss**2/_m2s[_t-1,:,_pi]), 1e-6, np.inf)
-    _ss = np.sqrt(h**2*_v2s[4])
-    _th2s[_t,:,4] = np.clip(np.random.uniform(_m2s[_t-1,:,4]-np.sqrt(3)*_ss, _m2s[_t-1,:,4]+np.sqrt(3)*_ss), -0.999, 0.999)
-    # (2.4) SV 狀態更新
-    _xp1 = np.maximum(_x2s[_t-1], 1e-12)
-    _r1_ = (y[_t,1] - (_th2s[_t,:,0] - 0.5*_xp1)) / np.sqrt(_xp1)
-    _x2s[_t] = (_xp1 + _th2s[_t,:,1]*(_th2s[_t,:,2]-_xp1)
-                + _th2s[_t,:,3]*np.sqrt(_xp1)*(_th2s[_t,:,4]*_r1_
-                  + np.sqrt(np.maximum(1-_th2s[_t,:,4]**2, 0))*_r2_s2[_t]))
-    _x2s[_t] = np.abs(_x2s[_t])
-    # (3.1) 重要性權重（單變量）
-    _MUn2  = _th2s[_t,:,0] - _x2s[_t]/2.0
-    _SIGn2 = np.sqrt(np.maximum(_x2s[_t], 1e-12))
-    _MUp2  = _m2s[_t-1,:,0] - _mu2s[_t]/2.0
-    _SIGp2 = np.sqrt(np.maximum(_mu2s[_t], 1e-12))
-    _ln2   = stats.norm.pdf(y[_t,1], _MUn2, _SIGn2)
-    _lp2   = stats.norm.pdf(y[_t,1], _MUp2, _SIGp2)
-    _w2s[_t] = _ln2 / np.maximum(_lp2, 1e-300)
-    _wsum = _w2s[_t].sum()
-    _w2s[_t] = _w2s[_t]/_wsum if _wsum > 0 else np.full(N, 1.0/N)
-
-# IS T-1 後驗均值（兩市場獨立）
-_th1f_s = np.mean(_th1s[T-1], axis=0)          # shape (k,)
-_th2f_s = np.mean(_th2s[T-1], axis=0)          # shape (k,)
-_xf_s   = np.array([np.mean(_x1s[T-1]), np.mean(_x2s[T-1])])  # shape (2,)
-print('獨立單市場 IS 完成')
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ──  FKO：每個模型用自己的完整參數集（μ AND Σ）─────────────────────
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _run_oos_filter(th1_f, th2_f, x_f):
-    """OOS 確定性均值演進：輸入為 1D 點估計向量，只保留資料驅動項，無隨機噪聲。
-    th1_f, th2_f: shape (k,)；x_f: shape (2,)
-    回傳 (mu1_oos, mu2_oos, h_roll (T_pred,2), drift_oos (T_pred,2))。"""
-    _mu1, _k1, _tl1, _s1, _rh1 = (float(th1_f[0]), float(th1_f[1]), float(th1_f[2]),
-                                    float(th1_f[3]), float(th1_f[4]))
-    _mu2, _k2, _tl2, _s2, _rh2 = (float(th2_f[0]), float(th2_f[1]), float(th2_f[2]),
-                                    float(th2_f[3]), float(th2_f[4]))
-    _x   = np.array([float(x_f[0]), float(x_f[1])])
-
-    _xst = np.empty((T_pred, 2))
-    _hr  = np.empty((T_pred, 2))
-    for _t in range(T_pred):
-        _xst[_t] = _x
-        _hr[_t]  = np.maximum(_x, 1e-10)
-        if _t < T_pred - 1:
-            _sx1 = float(np.sqrt(max(_x[0], 1e-8)))
-            _sx2 = float(np.sqrt(max(_x[1], 1e-8)))
-            _ra  = (y_pred[_t,0] - (_mu1 - 0.5*_x[0])) / _sx1
-            _rb  = (y_pred[_t,1] - (_mu2 - 0.5*_x[1])) / _sx2
-            _x[0] = max(_x[0] + _k1*(_tl1 - _x[0]) + _s1*_sx1*_rh1*_ra, 1e-10)
-            _x[1] = max(_x[1] + _k2*(_tl2 - _x[1]) + _s2*_sx2*_rh2*_rb, 1e-10)
-
-    _drift = np.column_stack([
-        _mu1 - 0.5*_xst[:,0],
-        _mu2 - 0.5*_xst[:,1]
-    ])
-    return _mu1, _mu2, _hr, _drift
 
 
-def _fko_perf_fee(Rp_model, Rp_bench, gamma):
-    return _perf_fee(Rp_model, Rp_bench, gamma)
 
 
-print('\n' + '═'*78)
-print(' FKO 投資組合經濟價值評估 ')
-print('═'*78)
-print('  【設計說明】')
-print('  模型              IS 後驗來源                         Σ')
-print('  SV-Copula       → 聯合 IS（best copula）T-1 後驗      ρ_const(best copula) + 各自 h_roll')
-print('  Separate SV     → 兩個獨立單市場 IS T-1 後驗           ρ=0 + 各自 h_roll（獨立重取樣）')
-print('  SepSV+ρ_cop     → 兩個獨立單市場 IS T-1 後驗           ρ_const(best copula) + SepSV h_roll')
-print('  OOS h_roll：IS 後驗折疊為均值點估計，確定性演進（只保留資料驅動項，無噪聲）')
-print('  SV-Copula vs Separate SV：涵蓋 ① copula ρ  ② 聯合 vs 獨立重取樣 兩效果')
-print('  SepSV+ρ_cop  vs Separate SV：單獨分離 ① copula ρ 的貢獻（參數來源相同）')
+# ──────────────────── 績效費計算、檢定、表格 ─────────────────────────────────────────────────
 
-_th1_c2 = theta1_s[T-1, :, best_ci_out]   # shape (k,)，全序列粒子均值
-_th2_c2 = theta2_s[T-1, :, best_ci_out]   # shape (k,)
-_xf_c2  = x_s[T-1, :, best_ci_out]        # shape (p,)
 
-_mu1_c2, _mu2_c2, _hr_c2, _dr_c2 = _run_oos_filter(_th1_c2, _th2_c2, _xf_c2)
-_mu1_s2, _mu2_s2, _hr_s2, _dr_s2 = _run_oos_filter(_th1f_s, _th2f_s, _xf_s)
-
-print(f'\n  μ_oos 資產1: SV-Copula={_mu1_c2:.6f}  Separate SV={_mu1_s2:.6f}  差={_mu1_c2-_mu1_s2:+.6f}')
-print(f'  μ_oos 資產2: SV-Copula={_mu2_c2:.6f}  Separate SV={_mu2_s2:.6f}  差={_mu2_c2-_mu2_s2:+.6f}')
-_tau2f  = float(R_mat[0, best_ci_out])
-_rho2f  = float(np.clip(np.sin(np.pi * _tau2f / 2.0), -0.999, 0.999))
-print(f"  ρ_const(SV-Copula) = {_rho2f:.6f}  ← {copula_list[best_ci_out]}  Kendall τ = {_tau2f:.6f}")
-
-_mu_t_c2 = np.tile(np.mean(_dr_c2, axis=0), (T_pred, 1))
-_mu_t_s2 = np.tile(np.mean(_dr_s2, axis=0), (T_pred, 1))
-
-_cov_c2 = _build_cov(np.full(T_pred, _rho2f), _hr_c2)
-_cov_s2 = _build_cov(np.zeros(T_pred),         _hr_s2)
-_cov_h2 = _build_cov(np.full(T_pred, _rho2f), _hr_s2)   # SepSV 參數 + copula ρ
-
-_mu_tgt3 = float(np.mean(drift_is))
-
-_Rp_c2, _To_c2, _ = _portfolio(_cov_c2, _mu_t_c2, _mu_tgt3)
-_Rp_s2, _To_s2, _ = _portfolio(_cov_s2, _mu_t_s2, _mu_tgt3)
-_Rp_h2, _To_h2, _ = _portfolio(_cov_h2, _mu_t_s2, _mu_tgt3)   # μ 同 SepSV，只換 ρ
-
-_pc3 = {
-    'SV-Copula':   (_Rp_c2, _To_c2),
-    'Separate SV': (_Rp_s2, _To_s2),
-    'SepSV+ρ_cop': (_Rp_h2, _To_h2),
-}
-
-print()
-_MW3 = [14, 7, 12, 12, 10]
-_MH3 = ['模型', '含TC', '年化均值%', '年化波動%', 'Sharpe']
-print('── 表一：各模型投資組合年化績效（各行為該模型自身 Rp，各自 μ 與 Σ）──')
-print('  ' + '  '.join(_rj(h, w) for h, w in zip(_MH3, _MW3)))
-print('  ' + '  '.join('-'*w for w in _MW3))
-for _mn3, (_Rr3, _Tr3) in _pc3.items():
-    for _wtc3, _tl3 in [(False, '否'), (True, '是')]:
-        _Re3 = _Rr3 - TC_BPS * _Tr3 if _wtc3 else _Rr3.copy()
-        _a3, _v3, _s3 = _ann_stats(_Re3)
-        print('  ' + '  '.join([
-            _lj(_mn3,        _MW3[0]),
-            _rj(_tl3,        _MW3[1]),
-            _rj(_ff(_a3*100),_MW3[2]),
-            _rj(_ff(_v3*100),_MW3[3]),
-            _rj(_ff(_s3),    _MW3[4]),
-        ]))
-    print()
+VAL_WIN = 22   # FKO 報酬率驗證窗口：OOS 初期一個月（22 個交易日）
 
 _FW3 = [4, 14, 7, 11, 11, 9]
 _FH3 = ['γ', '模型', '含TC', 'Δ(bps)', 'DM-stat', 'p(gain)']
-print('── 表二：FKO 年化轉換費 Δ（各模型 vs Separate SV 基準）──')
-print('  Δ > 0：投資人願由 Separate SV 切換至該模型')
-print('  p(gain)：效用差 DM 單側 p 值（* p<0.05 → 模型效用顯著較高）')
+
+
+
+# 拿計算過的波動度、tau 來用
+_rv_true   = pd.DataFrame(rv_pred_m).ffill().values
+_rv_true   = np.maximum(_rv_true, 1e-10)
+
+_tau2f     = float(R_mat[0, best_ci_out])                                        # IS的最終估計 tau
+_rho2f     = float(np.clip(np.sin(np.pi * _tau2f / 2.0), -0.999, 0.999))
+rho_series = np.clip(np.sin(np.pi * _tau_mod_short / 2.0), -0.999, 0.999)  # 以公式估計 rho
+rho_series = np.where(np.isnan(rho_series), _rho2f, rho_series)                  # 保險 fallback
+
+_mu_is_hist = np.mean(y, axis=0)   # IS 各資產日報酬均值
+_dr_rv      = np.column_stack([
+    np.full(T_pred, _mu_is_hist[0]) - _rv_true[:, 0] / 2,
+    np.full(T_pred, _mu_is_hist[1]) - _rv_true[:, 1] / 2
+])                                 # 報酬率均值 ( implies 共用相同 μ_ex )
+
+
+
+# 模型 tau 的實現組合報酬 ( SV-Copula 與基準 SepSV  )
+_cov_c2_rv = _build_cov(rho_series,       _rv_true)
+_cov_s2_rv = _build_cov(np.zeros(T_pred), _rv_true)
+
+_Rp_c2_rv = {}; _To_c2_rv = {}
+_Rp_s2_rv = {}; _To_s2_rv = {}
+for _gm in GAMMAS:
+    _Rp_c2_rv[_gm], _To_c2_rv[_gm], _ = _portfolio_ra(_cov_c2_rv, _dr_rv, _gm)
+    _Rp_s2_rv[_gm], _To_s2_rv[_gm], _ = _portfolio_ra(_cov_s2_rv, _dr_rv, _gm)
+
+
+
+# 真值 tau：OOS 置中窗 Kendall 的實現組合報酬
+_rho_real = np.clip(np.sin(np.pi * _tau_real_short / 2.0), -0.999, 0.999)
+_rho_real = np.where(np.isnan(_rho_real), _rho2f, _rho_real)
+_cov_real_rv = _build_cov(_rho_real, _rv_true)
+
+_Rp_real_rv  = {}; _To_real_rv = {}
+for _gm in GAMMAS:
+    _Rp_real_rv[_gm], _To_real_rv[_gm], _ = _portfolio_ra(_cov_real_rv, _dr_rv, _gm)
+
+
+
+# 固定 tau：IS 估計的實現組合報酬
+_cov_fixed_rv = _build_cov(np.full(T_pred, _rho2f), _rv_true)
+
+_Rp_fixed_rv = {}; _To_fixed_rv = {}
+for _gm in GAMMAS:
+    _Rp_fixed_rv[_gm], _To_fixed_rv[_gm], _ = _portfolio_ra(_cov_fixed_rv, _dr_rv, _gm)
+
+
+
+
+print('\n' + '═'*78)
+print(f' FKO（oracle RV + IS 歷史均值）— 差異純為 copula ρ（僅 OOS 前 {VAL_WIN} 天）')
+print('═'*78)
+print(f'  Σ 對角線與 Itô 修正：rv_pred_m（{RV_WIN_TRUE} 期置中窗 oracle RV）')
+print(f'  μ̂_t：IS 期樣本均值（固定，資產1={_mu_is_hist[0]:.6f}，資產2={_mu_is_hist[1]:.6f}）')
+print('  三模型 μ_ex 與 Σ 對角線完全相同，SV-Copula vs SepSV 差異純為 copula ρ')
+print('  ！波動度含未來資訊（oracle），為不可行估計，僅供隔離 ρ 效果參考')
+print(f'  驗證窗口：僅取 OOS 前 {VAL_WIN} 個交易日，與表二一致')
 print()
 print('  ' + '  '.join(_rj(h, w) for h, w in zip(_FH3, _FW3)))
 print('  ' + '  '.join('-'*w for w in _FW3))
 
-_Rb3r_s, _Tb3r_s = _pc3['Separate SV']
+_pc3_rv = {_gm: {
+    'SV-Copula':   (_Rp_c2_rv[_gm], _To_c2_rv[_gm]),
+    'Separate SV': (_Rp_s2_rv[_gm], _To_s2_rv[_gm]),
+    '真值τ':        (_Rp_real_rv[_gm],  _To_real_rv[_gm]),
+    '固定τ':        (_Rp_fixed_rv[_gm], _To_fixed_rv[_gm]),
+} for _gm in GAMMAS}
+
+
 for _gm3 in GAMMAS:
-    for _mn3 in ['SV-Copula', 'SepSV+ρ_cop']:
-        _Rm3r, _Tm3r = _pc3[_mn3]
-        for _tc3, _tcl3 in [(False, '否'), (True, '是')]:
-            _Rm3 = _Rm3r - TC_BPS * _Tm3r if _tc3 else _Rm3r.copy()
-            _Rb3 = _Rb3r_s - TC_BPS * _Tb3r_s if _tc3 else _Rb3r_s.copy()
-            _dd3   = _fko_perf_fee(_Rm3, _Rb3, _gm3)
-            _dbps3 = _dd3 * ANN * 1e4 if not np.isnan(_dd3) else np.nan
-            _Um3   = _utility(_Rm3, _gm3)
-            _Ub3   = _utility(_Rb3, _gm3)
-            _ds3, _, _pg3_less = _dm_test(-_Ub3, -_Um3)
-            _pg3 = 1.0 - _pg3_less
+
+    _Rb3r_rv, _Tb3r_rv = _pc3_rv[_gm3]['Separate SV']
+
+    for _mn3 in ['SV-Copula', '真值τ', '固定τ']:
+
+        _Rm3r_rv, _Tm3r_rv = _pc3_rv[_gm3][_mn3]
+
+        for _tc3, _tcl3 in [(False, '否'), (True, '是')]:               # ( 交易成本開關是 _tc3 )
+
+            # 模型與基準的實現組合報酬 - 交易成本 ( TC_BPS * _Tm3r_rv 是 成本率 × 週轉率)
+            _Rm3_rv = (_Rm3r_rv - TC_BPS * _Tm3r_rv if _tc3 else _Rm3r_rv.copy())[:VAL_WIN]
+            _Rb3_rv = (_Rb3r_rv - TC_BPS * _Tb3r_rv if _tc3 else _Rb3r_rv.copy())[:VAL_WIN]
+
+            _dd3_rv   = _perf_fee(_Rm3_rv, _Rb3_rv, _gm3)                         # 績效費
+            _dbps3_rv = _dd3_rv * ANN * 1e4 if not np.isnan(_dd3_rv) else np.nan  # 績效費年化
+
+            _Um3_rv   = _utility(_Rm3_rv, _gm3)
+            _Ub3_rv   = _utility(_Rb3_rv, _gm3)
+            _ds3_rv, _, _pg3_less_rv = _dm_test(-_Ub3_rv, -_Um3_rv)
+            _pg3_rv = 1.0 - _pg3_less_rv                                          # 績效費檢定
+
             print('  ' + '  '.join([
-                _rj(f'{_gm3:.0f}',        _FW3[0]),
-                _lj(_mn3,                 _FW3[1]),
-                _rj(_tcl3,                _FW3[2]),
-                _rj(_ff(_dbps3, '.2f'),   _FW3[3]),
-                _rj(_ff(_ds3),            _FW3[4]),
-                _rj(_ff(_pg3) + (_sig(_pg3) if not np.isnan(_pg3) else ''), _FW3[5]),
+                _rj(f'{_gm3:.0f}',          _FW3[0]),
+                _lj(_mn3,                      _FW3[1]),
+                _rj(_tcl3,                     _FW3[2]),
+                _rj(_ff(_dbps3_rv, '.2f'), _FW3[3]),
+                _rj(_ff(_ds3_rv),              _FW3[4]),
+                _rj(_ff(_pg3_rv) + (_sig(_pg3_rv) if not np.isnan(_pg3_rv) else ''), _FW3[5]),
             ]))
     print()
 
-print()
-print('  【注腳】')
-print('  (1) 靜態相依：copula 為 IS 固定擬合，ρ 為常數；非動態條件相依。')
-if copula_list[best_ci_out] not in ('copulaN', 'copulaT'):
-    print(f'  (2) Archimedean 近似：{copula_list[best_ci_out]} 使用 ρ=sin(πτ/2) 為近似轉換，詮釋需謹慎。')
-print('  (3) Δ > 0 且 p(gain) < 0.05 → 聯合 SV-Copula 在本樣本有統計顯著正 EV。')
-print('  (4) Δ 同時反映 copula 相依與聯合估計效果，為完整聯合框架 vs 獨立單市場之總經濟價值。')
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ── Mincer-Zarnowitz 型相依動態追蹤檢定（修正版）────────────────────────────────
-# 設計：τ_model[t]（t 時點資訊）→ 預測 τ_realized[t]（未來 h 期已實現相依）
-# IS/OOS τ_model 均用「擴張視窗重擬合同族 copula」，方法一致、可跨段比較
-# τ_realized = 向前 MZ_WIN 期 Kendall τ（原始報酬，model-free，h=MZ_WIN）
-# 標準誤：Newey-West HAC（lag=MZ_WIN-1），處理滾動視窗造成的強自相關
-# IS 另附 SDPF rho_Ns 作為對照（估計子差異歸因）
-# ═══════════════════════════════════════════════════════════════════════════════
-MZ_WIN = 60
-MZ_LAG = MZ_WIN - 1   # NW HAC lag = 視窗重疊期數
 
-# ── IS PITs（best copula 平滑後驗重算，用於滾動重擬合）───────────────────────
-_MU_mz  = (np.column_stack([theta1_s[:, 0, best_ci_out],
-                              theta2_s[:, 0, best_ci_out]])
-           - x_s[:, :, best_ci_out] / 2.0)
-_SIG_mz = np.sqrt(np.maximum(x_s[:, :, best_ci_out], 1e-12))
-_u_is_mz = np.clip(stats.norm.cdf(y, _MU_mz, _SIG_mz), 1e-6, 1 - 1e-6)
 
-# ── IS τ_model A：滾動固定視窗重擬合（與 τ_realized 同尺度 MZ_WIN 期）──────────
-_tau_mod_is_r = np.full(T, np.nan)
-for _t in range(MZ_WIN, T):
-    try:
-        _bc_mz = pv.Bicop(family=_FAMILY_MAP_PD[copula_list[best_ci_out]])
-        _bc_mz.fit(_u_is_mz[_t-MZ_WIN:_t])   # 固定回望 MZ_WIN 期
-        _tau_mod_is_r[_t] = float(_bc_mz.tau)
-    except Exception:
-        pass
 
-# ── IS τ_realized：向前 MZ_WIN 期 Kendall τ（原始報酬）─────────────────────
-_tau_real_is = np.full(T, np.nan)
-for _t in range(0, T - MZ_WIN):
-    _kt, _ = stats.kendalltau(y[_t:_t+MZ_WIN, 0], y[_t:_t+MZ_WIN, 1])
-    _tau_real_is[_t] = _kt
 
-# ── OOS τ_model：滾動固定視窗重擬合 OOS PIT（固定回望 MZ_WIN 期）──────────────
-_tau_mod_oos = np.full(T_pred, np.nan)
-for _t in range(MZ_WIN, T_pred):
-    try:
-        _bc_mz = pv.Bicop(family=_FAMILY_MAP_PD[copula_list[best_ci_out]])
-        _bc_mz.fit(u_oos_c[_t-MZ_WIN:_t])    # 固定回望 MZ_WIN 期
-        _tau_mod_oos[_t] = float(_bc_mz.tau)
-    except Exception:
-        pass
 
-# ── OOS τ_realized：向前 MZ_WIN 期 Kendall τ（原始報酬）────────────────────
-_tau_real_oos = np.full(T_pred, np.nan)
-for _t in range(0, T_pred - MZ_WIN):
-    _kt, _ = stats.kendalltau(y_pred[_t:_t+MZ_WIN, 0], y_pred[_t:_t+MZ_WIN, 1])
-    _tau_real_oos[_t] = _kt
+# ──────────────────── OOS 每日累積報酬差折線圖 ─────────────────────────────────────────────────
 
-# ── Newey-West HAC 共變異數矩陣 ─────────────────────────────────────────────
-def _nw_cov(X, resid, lag):
-    n   = len(resid)
-    Xe  = X * resid[:, np.newaxis]          # score: x_t * e_t，shape (n, k)
-    S   = Xe.T @ Xe / n
-    for l in range(1, lag + 1):
-        w     = 1.0 - l / (lag + 1)         # Bartlett kernel
-        Gam   = Xe[l:].T @ Xe[:-l] / n
-        S    += w * (Gam + Gam.T)
-    XtXi = np.linalg.inv(X.T @ X / n)
-    return XtXi @ S @ XtXi / n              # Var(β̂)
 
-# ── OLS + HAC 迴歸 ───────────────────────────────────────────────────────────
-def _mz_reg(x_arr, y_arr, lag):
-    _mk = ~(np.isnan(x_arr) | np.isnan(y_arr))
-    _x, _y = x_arr[_mk], y_arr[_mk]
-    _n = len(_x)
-    if _n < lag + 5:
-        return None
-    _X  = np.column_stack([np.ones(_n), _x])
-    _bt = np.linalg.lstsq(_X, _y, rcond=None)[0]
-    _e  = _y - _X @ _bt
-    _ss_r = float(np.sum(_e**2))
-    _ss_t = float(np.sum((_y - _y.mean())**2))
-    _r2   = 1.0 - _ss_r / _ss_t if _ss_t > 1e-20 else np.nan
-    _V    = _nw_cov(_X, _e, lag)
-    _se   = np.sqrt(np.maximum(np.diag(_V), 0))
-    _tab  = _bt / np.maximum(_se, 1e-20)
-    _pab  = [2.0 * float(stats.norm.sf(abs(_tv))) for _tv in _tab]   # HAC 漸近常態
-    _df   = np.array([_bt[0], _bt[1] - 1.0])   # H₀: a=0, b=1
-    try:
-        _W  = float(_df @ np.linalg.inv(_V) @ _df)
-        _pW = float(stats.chi2.sf(_W, 2))
-    except np.linalg.LinAlgError:
-        _W, _pW = np.nan, np.nan
-    _z_b1 = (_bt[1] - 1.0) / max(_se[1], 1e-20)        # L2: H₀ b=1，a 自由
-    _p_b1 = 2.0 * float(stats.norm.sf(abs(_z_b1)))
-    _sign = float(np.mean(                               # L3/4: 符號一致率
-        np.sign(_x - np.mean(_x)) == np.sign(_y - np.mean(_y))))
-    return {'a': _bt[0], 'b': _bt[1], 'se_a': _se[0], 'se_b': _se[1],
-            't_a': _tab[0], 't_b': _tab[1], 'p_a': _pab[0], 'p_b': _pab[1],
-            'z_b1': _z_b1, 'p_b1': _p_b1, 'sign': _sign,
-            'r2': _r2, 'W': _W, 'p_W': _pW, 'n': _n}
+_days_x = np.arange(1, VAL_WIN + 1)
 
-def _mz_print(res, label):
-    if res is None:
-        print(f'  {label}: 有效樣本不足')
-        return
-    print(f'  {label}  (n={res["n"]}，重疊版，HAC lag={MZ_LAG})')
-    print(f'  [L3/4 有訊號?]')
-    print(f'    b=0  z={res["t_b"]:6.2f}  p={res["p_b"]:.4f}  [H₀: b=0]'
-          + ('  *' if res['p_b'] < 0.05 else ''))
-    print(f'    符號一致率 = {res["sign"]:.4f}')
-    print(f'  [L2 幅度正確?]')
-    print(f'    b=1  z={res["z_b1"]:6.2f}  p={res["p_b1"]:.4f}  [H₀: b=1, a 自由]')
-    print(f'    截距 a={res["a"]:7.4f}  HAC-se={res["se_a"]:.4f}  z={res["t_a"]:6.2f}  p={res["p_a"]:.4f}')
-    print(f'    斜率 b={res["b"]:7.4f}  HAC-se={res["se_b"]:.4f}')
-    print(f'    Wald(a=0,b=1) χ²(2)={res["W"]:7.3f}  p={res["p_W"]:.4f}  R²={res["r2"]:.4f}')
-    print()
+def _cum_diff_bps(Rp_m, Rp_b):
+    return np.cumsum((Rp_m - Rp_b)[:VAL_WIN]) * 1e4
 
-# ── L5：HAC DM 檢定（d = e_naive²−e_model²；stat>0 → model wins）────────────
-def _mz_dm(e_model, e_naive, lag):
-    _mk = ~(np.isnan(e_model) | np.isnan(e_naive))
-    _em, _en = e_model[_mk], e_naive[_mk]
-    _n = len(_em)
-    if _n < lag + 5:
-        return np.nan, np.nan
-    _d  = _en**2 - _em**2
-    _dm = np.mean(_d)
-    _dc = _d - _dm
-    _s2 = np.sum(_dc**2) / _n
-    for l in range(1, lag + 1):
-        _s2 += 2 * (1 - l/(lag+1)) * np.sum(_dc[l:]*_dc[:-l]) / _n
-    _se  = np.sqrt(max(_s2, 0) / _n)
-    _stat = _dm / max(_se, 1e-20)
-    return _stat, float(stats.norm.sf(_stat))   # 單尾：p(model wins)
+# ── oracle RV + IS 均值（模型τ vs ρ=0；真值τ vs ρ=0；固定τ vs ρ=0，各一張）─────
+_oracle_d2_cfgs = [
+    ('模型τ', _Rp_c2_rv,    _To_c2_rv,    '#2196F3', 'fko_daily_oracle_model.png'),
+    ('真值τ', _Rp_real_rv,  _To_real_rv,  '#4CAF50',  'fko_daily_oracle_true.png'),
+    ('固定τ', _Rp_fixed_rv, _To_fixed_rv, '#FF9800',  'fko_daily_oracle_fixed.png'),
+]
 
-# ── L5：HLN encompassing（enc = e_naive(e_naive−e_model)；stat>0 → model encp naive）
-def _mz_enc(e_model, e_naive, lag):
-    _mk = ~(np.isnan(e_model) | np.isnan(e_naive))
-    _em, _en = e_model[_mk], e_naive[_mk]
-    _n = len(_em)
-    if _n < lag + 5:
-        return np.nan, np.nan
-    _enc = _en * (_en - _em)
-    _em2 = np.mean(_enc)
-    _ec  = _enc - _em2
-    _s2  = np.sum(_ec**2) / _n
-    for l in range(1, lag + 1):
-        _s2 += 2 * (1 - l/(lag+1)) * np.sum(_ec[l:]*_ec[:-l]) / _n
-    _se  = np.sqrt(max(_s2, 0) / _n)
-    _stat = _em2 / max(_se, 1e-20)
-    return _stat, float(stats.norm.sf(_stat))   # 單尾：p(model encompasses naive)
+for _oname, _Rp_o, _To_o, _clr, _fname in _oracle_d2_cfgs:
+    _fig6, _axes6 = plt.subplots(len(GAMMAS), 1,
+                                  figsize=(7, 4 * len(GAMMAS)), sharey=False)
+    if len(GAMMAS) == 1:
+        _axes6 = [_axes6]
+    for _gi, _gm in enumerate(GAMMAS):
+        _ax6 = _axes6[_gi]
+        _Rb_d0 = _Rp_s2_rv[_gm]; _Tb_d0 = _To_s2_rv[_gm]
+        for _tc, _tcl, _ls in [(False, '不含TC', '-'), (True, '含TC', '--')]:
+            _Rm_d = _Rp_o[_gm] - TC_BPS * _To_o[_gm] if _tc else _Rp_o[_gm]
+            _Rb_d = _Rb_d0 - TC_BPS * _Tb_d0 if _tc else _Rb_d0
+            _ax6.plot(_days_x, _cum_diff_bps(_Rm_d, _Rb_d),
+                      label=_tcl, color=_clr, linewidth=1.0, linestyle=_ls)
+        _ax6.axhline(0, color='black', linewidth=0.8, linestyle=':')
+        _ax6.set_title(f'γ={_gm:.0f}', fontsize=10)
+        _ax6.set_xlabel('OOS 日')
+        if _gi == 0:
+            _ax6.set_ylabel('累積報酬差（bps）')
+        _ax6.legend(fontsize=8)
+    _fig6.suptitle(f'OOS 每日累積報酬差（oracle RV，{_oname} vs ρ=0，前{VAL_WIN}天）',
+                   fontsize=12)
+    _fig6.tight_layout()
+    _fig6.savefig(_fname, dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f'  [{_oname} 每日折線圖已儲存至 {_fname}]')
 
-# ── L5：輸出 ──────────────────────────────────────────────────────────────────
-def _mz_lv5(tau_mod, tau_real, tau_const, tau_rw, lag):
-    _e_mod   = tau_real - tau_mod
-    _e_const = tau_real - tau_const        # tau_const 為純量
-    _e_rw    = tau_real - tau_rw
-    print(f'  [L5 打敗天真?]')
-    _dm_c, _p_c   = _mz_dm(_e_mod, _e_const, lag)
-    _ec_c, _pe_c  = _mz_enc(_e_mod, _e_const, lag)
-    _dm_r, _p_r   = _mz_dm(_e_mod, _e_rw, lag)
-    _ec_r, _pe_r  = _mz_enc(_e_mod, _e_rw, lag)
-    _s = lambda p: '  *' if (not np.isnan(p)) and p < 0.05 else ''
-    print(f'    vs 常數基準  : DM z={_dm_c:6.2f} p={_p_c:.4f}{_s(_p_c)}'
-          f'  ENC z={_ec_c:6.2f} p={_pe_c:.4f}{_s(_pe_c)}')
-    print(f'    vs 已實現外推: DM z={_dm_r:6.2f} p={_p_r:.4f}{_s(_p_r)}'
-          f'  ENC z={_ec_r:6.2f} p={_pe_r:.4f}{_s(_pe_r)}')
-    print()
 
-# ── 非重疊版（每 MZ_WIN 步取一點，消除重疊自相關，OLS + F 檢定）───────────────
-def _mz_reg_noovlp(x_arr, y_arr):
-    _mk  = ~(np.isnan(x_arr) | np.isnan(y_arr))
-    _all = np.where(_mk)[0]
-    if len(_all) == 0:
-        return None
-    _idx = _all[::MZ_WIN]   # 每 MZ_WIN 步取一點，確保非重疊
-    _x, _y = x_arr[_idx], y_arr[_idx]
-    _n = len(_x)
-    if _n < 4:
-        return None
-    _X   = np.column_stack([np.ones(_n), _x])
-    _bt  = np.linalg.lstsq(_X, _y, rcond=None)[0]
-    _e   = _y - _X @ _bt
-    _s2  = float(np.sum(_e**2)) / max(_n - 2, 1)
-    _se  = np.sqrt(np.maximum(np.diag(_s2 * np.linalg.inv(_X.T @ _X)), 0))
-    _tab = _bt / np.maximum(_se, 1e-20)
-    _pab = [2.0 * float(stats.t.sf(abs(_tv), df=_n - 2)) for _tv in _tab]
-    _ss_r = float(np.sum(_e**2))
-    _ss_t = float(np.sum((_y - _y.mean())**2))
-    _r2   = 1.0 - _ss_r / _ss_t if _ss_t > 1e-20 else np.nan
-    _df   = np.array([_bt[0], _bt[1] - 1.0])
-    _Fs   = float(_df @ (_X.T @ _X) @ _df) / (2.0 * _s2) if _s2 > 1e-20 else np.nan
-    _pF   = float(stats.f.sf(_Fs, 2, _n - 2)) if not np.isnan(_Fs) else np.nan
-    return {'a': _bt[0], 'b': _bt[1], 'se_a': _se[0], 'se_b': _se[1],
-            't_a': _tab[0], 't_b': _tab[1], 'p_a': _pab[0], 'p_b': _pab[1],
-            'r2': _r2, 'F': _Fs, 'p_F': _pF, 'n': _n}
-
-def _mz_print_noovlp(res, label):
-    if res is None:
-        print(f'  {label}: 有效樣本不足（n<4）')
-        return
-    _warn = '  ⚠ 有效獨立樣本過少，p 值僅供參考' if res['n'] < 10 else ''
-    print(f'  {label}  (n_eff={res["n"]}，非重疊，OLS+t/F){_warn}')
-    print(f'    截距 a = {res["a"]:8.4f}  se={res["se_a"]:.4f}  t={res["t_a"]:6.2f}  p={res["p_a"]:.4f}')
-    print(f'    斜率 b = {res["b"]:8.4f}  se={res["se_b"]:.4f}  t={res["t_b"]:6.2f}  p={res["p_b"]:.4f}')
-    print(f'    R²    = {res["r2"]:8.4f}')
-    print(f'    F(a=0,b=1, 2,{res["n"]-2}) = {res["F"]:.3f}  p={res["p_F"]:.4f}')
-    print()
-
-# ── 天真基準（L5 用）─────────────────────────────────────────────────────────
-# 常數基準：IS τ_realized 樣本內均值（OOS 段亦用此值，保持樣本外性質）
-_tau_const_is  = float(np.nanmean(_tau_real_is))
-_tau_const_oos = _tau_const_is
-
-# 已實現外推（random walk）：過去 MZ_WIN 期原始報酬的 Kendall τ
-_tau_rw_is  = np.full(T, np.nan)
-for _t in range(MZ_WIN, T):
-    _kt, _ = stats.kendalltau(y[_t-MZ_WIN:_t, 0], y[_t-MZ_WIN:_t, 1])
-    _tau_rw_is[_t] = _kt
-
-_tau_rw_oos = np.full(T_pred, np.nan)
-for _t in range(MZ_WIN, T_pred):
-    _kt, _ = stats.kendalltau(y_pred[_t-MZ_WIN:_t, 0], y_pred[_t-MZ_WIN:_t, 1])
-    _tau_rw_oos[_t] = _kt
-
-print('\n' + '═'*78)
-print(' Mincer-Zarnowitz 型相依動態追蹤檢定（修正版）')
-print('═'*78)
-print(f'  τ_model    = 滾動 {MZ_WIN} 期固定視窗重擬合 {copula_list[best_ci_out]}（IS/OOS 同方法）')
-print(f'  τ_realized = 向前 {MZ_WIN} 期 Kendall τ（原始報酬，model-free）')
-print(f'  重疊版：NW HAC（lag={MZ_LAG}），z 統計量，Wald χ²(2)')
-print(f'  非重疊版：每 {MZ_WIN} 步取一點（n_eff≈n/{MZ_WIN}），OLS t/F（真實有效自由度）')
-print(f'  迴歸：τ_realized[t, t+h] = a + b·τ_model[t-h, t] + ε  （h={MZ_WIN}）')
-print()
-
-print(f'── IS 段：τ_model = 滾動重擬合 ──')
-_mz_print(_mz_reg(_tau_mod_is_r, _tau_real_is, MZ_LAG),
-          f'{copula_list[best_ci_out]} IS-refit（重疊）')
-_mz_lv5(_tau_mod_is_r, _tau_real_is, _tau_const_is, _tau_rw_is, MZ_LAG)
-_mz_print_noovlp(_mz_reg_noovlp(_tau_mod_is_r, _tau_real_is),
-                 f'{copula_list[best_ci_out]} IS-refit')
-
-print(f'── OOS 段：τ_model = 滾動重擬合 OOS PIT ──')
-_mz_print(_mz_reg(_tau_mod_oos, _tau_real_oos, MZ_LAG),
-          f'{copula_list[best_ci_out]} OOS-refit（重疊）')
-_mz_lv5(_tau_mod_oos, _tau_real_oos, _tau_const_oos, _tau_rw_oos, MZ_LAG)
-_mz_print_noovlp(_mz_reg_noovlp(_tau_mod_oos, _tau_real_oos),
-                 f'{copula_list[best_ci_out]} OOS-refit')
